@@ -2,7 +2,7 @@ module.exports = {
   version: "8.0",
   title: "Maestro AMD",
   description: "[AMD ONLY] All-in-one local AI video, image & music studio built on the WanGP pipeline (Wan 2.1/2.2, LTX-2.3, Qwen, Hunyuan Video, Flux). ROCm-powered. Supported on Windows and Linux for RDNA 2-4 dGPUs (RX 6000/7000/8000/9000) and gfx1150-53 APUs (Strix Point/Halo, Krackan Point/Halo). 6 GB+ VRAM recommended. For NVIDIA GPUs use the upstream Maestro app. Credits: the app itself is Maestro by Blizaine (github.com/Blizaine/Maestro) — this is just an AMD installer wrapper around it. The clone-at-install-time approach used to port it to AMD was pioneered by 6Morpheus6's wan2gp-amd (github.com/6Morpheus6/wan2gp-amd).",
-  icon: "icon.png",
+  icon: "maestro_simplified_icon_alpha.png",
   menu: async (kernel, info) => {
     const installed = info.exists("Maestro/app/env-amd")
     const running = {
