@@ -26,8 +26,12 @@ module.exports = async (kernel) => {
         params: {
           venv: runtime.env,
           venv_python: runtime.python,
-          path: ".",
-          message: "python install_sitecustomize.py",
+          // MUST be the runtime venv's path, not ".": Pinokio resolves
+          // `venv` relative to `path` (see launcher_profile.js). The
+          // helper itself is invoked by absolute path (__dirname is the
+          // wrapper root — update.js is required from there).
+          path: runtime.path,
+          message: `python "${__dirname}/install_sitecustomize.py"`,
         },
       },
       // Python deps may have moved between upstream commits.
@@ -50,8 +54,8 @@ module.exports = async (kernel) => {
         params: {
           venv: runtime.env,
           venv_python: runtime.python,
-          path: ".",
-          message: "python ensure_ffmpeg.py",
+          path: runtime.path,
+          message: `python "${__dirname}/ensure_ffmpeg.py"`,
         },
       },
       // Skip the multi-GB ROCm wheel reinstall unless the marker is
