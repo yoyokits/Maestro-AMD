@@ -1,3 +1,7 @@
+<p align="center">
+    <img src="maestro_simplified_icon_alpha.png" alt="Maestro AMD icon" width="150">
+</p>
+
 # Maestro AMD
 
 **A 100% local AI video, image & music studio — for AMD GPU owners.**
