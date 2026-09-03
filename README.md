@@ -141,14 +141,13 @@ inside Maestro itself.
 ## Installing
 
 1. Install [Pinokio](https://pinokio.computer) if you don't already have it.
-2. Point Pinokio at this repository (or search Discover for "Maestro AMD"
-   once it's listed).
+2. Open the Maestro AMD listing on the Pinokio store — [pinokio.co/apps/github-com-yoyokits-maestro-amd](https://pinokio.co/apps/github-com-yoyokits-maestro-amd) — and install it from there, or point Pinokio at this repository directly (or search Discover for "Maestro AMD" once it's listed).
 3. Click **Install**. This clones Maestro, sets up a Python environment,
    installs the AMD ROCm build of PyTorch for your specific GPU, and builds
    the web UI. Takes roughly 10–20 minutes depending on your connection —
    this does *not* download model weights yet, those come later, per model,
    the first time you use one.
-4. Click **Start**. A browser tab opens with the Maestro UI once the server
+7. Click **Start**. A browser tab opens with the Maestro UI once the server
    is ready.
 
 ### Keeping it updated
