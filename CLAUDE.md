@@ -24,18 +24,28 @@ Repo root (after `Install` has been clicked in Pinokio):
 ```
 Maestro-AMD/
 ├── pinokio.js              ← app metadata + dynamic menu
-├── install.js              ← clone + build (AMD-guarded)
+├── install.js              ← clone + build (AMD-guarded, fails fast)
 ├── torch.js                ← ROCm wheel install, per gfx target
-├── start.js                ← daemon: python launch.py
+├── start.js                ← daemon: python launch.py (+ user_env.json)
 ├── update.js               ← git pull + refresh deps
 ├── start_latest.js         ← "Update & Start" one-click
-├── reset.js                ← rm -rf Maestro/
-├── launcher_profile.js     ← AMD GPU detection + runtime profile
-├── sitecustomize.py        ← copied into venv site-packages, see "Known runtime issues" #1
-├── install_sitecustomize.py← the copier itself, called from install.js/update.js
+├── repair.js               ← rebuild the env, KEEP models
+├── rollback.js             ← undo the last update
+├── reset.js                ← rm -rf Maestro/ (destroys models)
+├── diagnose.js/.py         ← health check; run this first on any report
+├── sam_install.js          ← optional Inpaint / SAM 3.1 (isolated env)
+├── launcher_profile.js     ← GPU detection + runtime profile
+├── maestro_amd_preamble.py ← FSDP shadow, see "Known runtime issues" #1
+├── install_preamble.py     ← installs the above + its .pth into the venv
+├── verify_rocm_torch.py    ← guards against a CUDA/CPU torch, see #7
+├── configure_amd_defaults.py ← AMD-correct H3/attention defaults, see #6
+├── update_state.py         ← rollback point + UI-rebuild bookkeeping
 ├── ensure_ffmpeg.py        ← provisions ffmpeg/ffprobe, see #3/#4
 ├── test_gpu_detection.js   ← unit tests for launcher_profile/torch.js detection logic
+├── .maestro_state/         ← wrapper state (git-ignored, OUTSIDE Maestro/)
+├── user_env.json           ← optional env overrides (git-ignored)
 ├── CLAUDE.md               ← this file
+├── PERFORMANCE.md          ← CUDA-vs-ROCm gap analysis, what's closable
 ├── README.md               ← user-facing (short)
 └── Maestro/                ← upstream clone (created by install.js)
     ├── app/                ← Python backend (launch.py, wgp.py, ...)
@@ -147,8 +157,8 @@ Pinokio activates/creates a different venv at whatever directory you
 named instead.
 
 The pre-fix wrapper ran the two root-level helper scripts
-(`install_sitecustomize.py`, `ensure_ffmpeg.py`) with `path: "."`. That
-created a stray `env-amd` at the **app root**, and `sitecustomize.py` +
+(`install_preamble.py`, `ensure_ffmpeg.py`) with `path: "."`. That
+created a stray `env-amd` at the **app root**, and the preamble +
 `ffmpeg`/`ffprobe` landed there — while the real runtime venv at
 `Maestro/app/env-amd` (used by `torch.js` and `start.js`, which correctly
 use `path: "Maestro/app"`) never got the FSDP shadow. Result: `launch.py`
@@ -156,7 +166,7 @@ crashed on the `torch.distributed.fsdp` import — the exact symptom of
 Known runtime issue #1, despite the fix being "installed".
 
 **Fix.** Helper steps now use `path: runtime.path` and invoke the helper
-by absolute path (`python "${__dirname}/install_sitecustomize.py"`), so
+by absolute path (`python "${__dirname}/install_preamble.py"`), so
 the venv stays the runtime one while the script still resolves from the
 wrapper root. `reset.js` also removes the stray root `env-amd` so a Reset
 returns to a truly clean state. `runtime.path` is baked into the
@@ -172,16 +182,25 @@ step with any other `path` gets its own private venv.
 
 `update.js` runs, in order:
 
-1. `git -C Maestro fetch origin && git -C Maestro reset --hard origin/HEAD`
+1. Records the current upstream SHA to `.maestro_state/prev_head` so
+   `rollback.js` has somewhere to go.
+2. `git -C Maestro fetch origin && git -C Maestro reset --hard origin/HEAD`
    — matches upstream tracked files exactly. **Wipes any manual edits**
    inside `Maestro/`. Untracked user data (models, outputs, config) is
    preserved because `git reset` only touches tracked files.
-2. Re-runs `uv pip install -r requirements.txt` in the venv.
-3. Runs `torch.js` **only if** the runtime marker
-   (`Maestro/app/env-amd/.maestro_amd_v1.installed`) is missing. Delete
-   that marker to force a full ROCm wheel reinstall on the next update.
-4. Self-heals the `seedvc` component if the user deleted it.
-5. Rebuilds the React UI (`npm install && npm run build`).
+3. Re-installs the startup preamble (also migrates pre-`.pth` installs).
+4. Re-runs `uv pip install -r requirements.txt` in the venv.
+5. Runs `verify_rocm_torch.py`, which flags a reinstall if the resolver
+   replaced the ROCm torch with a CUDA or CPU build (issue #7).
+6. Runs `torch.js` **only if** the runtime marker
+   (`Maestro/app/env-amd/.maestro_amd_v1.installed`) is missing **or**
+   that flag is set. Delete the marker to force a full ROCm wheel
+   reinstall on the next update.
+7. Provisions ffmpeg/ffprobe, then re-asserts the AMD-correct defaults
+   (issue #6) — upstream may have added new model variants needing them.
+8. Self-heals the `seedvc` component if the user deleted it.
+9. Rebuilds the React UI **only when `ui/` actually changed** between the
+   old and new revision (`update_state.py ui-check`). Fails open.
 
 For **easy/automatic updating** the wrapper exposes two shapes in the
 Pinokio menu:
@@ -190,6 +209,20 @@ Pinokio menu:
 - **Update & Start** — runs `start_latest.js`, which chains `update.js`
   → `start.js`. One click, always latest. This is the recommended
   everyday launcher.
+
+Recovery ladder, cheapest first — the menu presents them in this order
+and only offers Reset last:
+
+- **Diagnose** (`diagnose.js`) — read-only health report. Always the
+  first thing to ask a user for.
+- **Roll back last update** (`rollback.js`) — only shown when
+  `.maestro_state/prev_head` exists. Returns to the pre-update revision.
+- **Repair** (`repair.js`) — `git clean -fdx` inside `Maestro/` with the
+  user-data paths excluded, then a full reinstall. Keeps models.
+- **Reset** (`reset.js`) — deletes everything, models included.
+
+`.maestro_state/` deliberately lives *outside* `Maestro/` so Repair's own
+`git clean` cannot destroy the rollback point.
 
 ## Development / testing changes
 
@@ -225,12 +258,14 @@ For the async-export files (install/torch/start/update),
 `node --check` catches parse errors but not runtime issues in the
 returned config object. Test the runtime path via Pinokio.
 
-`sitecustomize.py`, `install_sitecustomize.py`, and `ensure_ffmpeg.py`
+The Python helpers (`maestro_amd_preamble.py`, `install_preamble.py`,
+`ensure_ffmpeg.py`, `diagnose.py`, `verify_rocm_torch.py`,
+`update_state.py`, `configure_amd_defaults.py`)
 are plain Python — check with
-`python -m py_compile sitecustomize.py install_sitecustomize.py ensure_ffmpeg.py`
+`python -m py_compile <them>`
 using the same `env-amd` venv install.js/update.js invoke them with, then
 actually run them against a real `Maestro/` clone (all are idempotent and
-safe to re-run) before trusting a change to any. For `sitecustomize.py`
+safe to re-run) before trusting a change to any. For the preamble
 in particular, verify by starting a fresh Python interpreter in the venv
 and checking `'torch.distributed.fsdp' in sys.modules` — it must be
 `True` before any user code runs.
@@ -260,8 +295,8 @@ chain crashes, taking the whole app down for a code path nothing uses.
 Confirmed this isn't ROCm-specific in principle — any PyTorch build without
 a working distributed backend would hit it.
 
-**Fix — automated, `sitecustomize.py` + `install_sitecustomize.py`.** Zero
-modification to Maestro's tree. `install_sitecustomize.py` (invoked by
+**Fix — automated, `maestro_amd_preamble.py` + `install_preamble.py`.**
+Zero modification to Maestro's tree. `install_preamble.py` (invoked by
 `install.js`/`update.js` after every clone/reset) drops
 `sitecustomize.py` into the venv's `site-packages` — a filename CPython
 auto-loads at every interpreter startup, before any user code runs. It
@@ -306,7 +341,7 @@ it; `install.js` handles that on the next Install.
 Filed upstream too: issue drafted against Blizaine/Maestro with the root
 cause + fix (not auto-submitted — GitHub issues need the reporter's own
 account). **If it's merged when you read this, delete
-`sitecustomize.py`, `install_sitecustomize.py`, and their call sites in
+`maestro_amd_preamble.py`, `install_preamble.py`, and their call sites in
 `install.js`/`update.js`** — the shadow shadows the *fixed* module too,
 which is a real (if minor) footgun for anyone who ever wants working
 multi-GPU FSDP downstream.
@@ -459,6 +494,214 @@ since GPU contention compounds the H3 problem above.
 Worth filing upstream (the missing `supports_nvfp4` check in the second
 branch): would fix the mislabeled "(Recommended)" on any non-NVFP4-capable
 hardware, not just AMD.
+
+### 6b. Two corrections to #6, from field evidence
+
+**(a) NVFP4's fallback runs on the GPU, not the CPU.** #6 above says the
+encoder "silently falls back to running on CPU". That is not what the
+code does. `shared/qtypes/nvfp4.py`, in the branch that prints
+`NVFP4: linear fallback`:
+
+```python
+qweight = weight.dequantize(dtype=input.dtype, device=input.device)
+return torch.nn.functional.linear(input, qweight, bias=bias_arg)
+```
+
+It dequantizes **to `input.device`** — the GPU — and runs `F.linear`
+there. It is slower than the fused NVFP4 kernel (a dequant per call) and
+it materializes full-precision weights, which raises **memory** pressure.
+The observed hang is best explained by that memory pressure on a heavy
+model, not by CPU execution. Keep the override — the hang was real — but
+do not repeat the "runs on CPU" explanation.
+
+**(b) GGUF Q4_K_M is field-proven on AMD; do not claim otherwise.** Logs
+from a live RX 7900 XTX / 32 GB install show **nine** H3 generations with
+GGUF Q4_K_M across two days, at 6 steps, up to 52,781 packed rows, at
+acceptable speed. An earlier revision of this file claimed H3 was
+"impractical on AMD" and switched the default to Q2_K. That was wrong,
+built on a single stalled run, and has been reverted.
+
+**What that stalled run actually implicates.** Every slow/stalled
+observation was on `minimax_h3_*_fused_turbo` at **4 steps** — upstream
+labels it *"H3 Fused 4-Step — References (Experimental)"*, and the
+checkpoint name (`...turbo8...`) suggests it is distilled for 8. The
+successful runs were all at 6 steps on the non-fused H3. Before blaming
+AMD for an H3 problem, **check the step count and whether the fused
+turbo variant is selected** — that is the variable that actually
+correlates.
+
+**Method note.** The mistake was generalizing from one run without
+checking `logs/api/start.js/*` for prior successes. Those logs record
+the encoder loaded, step count and packed rows per generation:
+
+```
+grep -oE "Loading Text Encoder '[^']*'" logs/api/start.js/<id>
+grep -oE "[0-9]+ steps; attention" logs/api/start.js/<id>
+```
+
+Read them before concluding anything about H3 performance.
+
+### 7. `AssertionError: Torch not compiled with CUDA enabled`
+
+**Symptom:** Maestro imports fine, logs some harmless-looking warnings,
+then dies ~40 frames deep with a message unrelated to the real cause:
+
+```
+[Runtime] Python 3.11.15 | PyTorch 2.14.0+cpu | CUDA none | CUDA unavailable (unknown)
+...
+  File "...\models\wan\modules\t5.py", line 630, in T5EncoderModel
+    device=torch.cuda.current_device(),
+AssertionError: Torch not compiled with CUDA enabled
+```
+
+**The tell is `PyTorch 2.14.0+cpu`** — a stock PyPI wheel, not the ROCm
+build. On ROCm, `torch.cuda.*` is the HIP API and works; on a CPU-only
+wheel there is no `cuda` module, so the first `torch.cuda.current_device()`
+in upstream's code asserts.
+
+Note what is *not* the problem, because these lines mislead:
+`Triton=missing`, `SageAttention=missing`, `FlashAttention is
+unavailable` and `[GGUF][llama.cpp CUDA] kernels unavailable` are all
+**normal on AMD** (PERFORMANCE.md §2) and appear on healthy installs too.
+
+**Root cause:** nothing in `requirements.txt` pins torch, but
+`torchcodec` / `accelerate` / `peft` / `timm` / `open_clip_torch` all
+depend on it. If the resolver decides the installed ROCm wheel doesn't
+satisfy a constraint it installs a stock PyPI torch over the top — CPU-only
+on Windows. Especially easy to reach via **Update**, which used to skip
+`torch.js` whenever the runtime marker existed, so nothing put the ROCm
+wheel back.
+
+**Fix — three layers, all automated:**
+
+1. `install.js` installs the ROCm wheels **before** `requirements.txt`, so
+   torch is already satisfied when the resolver runs.
+2. `verify_rocm_torch.py` runs after every requirements pass and writes
+   `.torch_needs_reinstall`; `update.js` re-runs `torch.js` on a missing
+   marker **or** that flag. This is the self-heal — an affected user just
+   clicks Update.
+3. `verify_rocm_torch.py --preflight` in `start.js` catches it before
+   launch and shows a readable dialog naming the cause and the fix.
+
+The preflight is deliberately **metadata-only and conservative**: it never
+imports torch, and only flags version strings that *prove* the build is
+wrong (`+cpu`, `+cu`, `cuda`). An unrecognised string — AMD's Windows
+nightlies do not always carry a `+rocm` tag — is treated as fine. A false
+positive would block a working install, which is worse than a late
+failure. Both flag files sit next to the venv and clear themselves once a
+good build is seen, so they cannot go stale.
+
+### 8. Update fails: `invalid peer certificate: UnknownIssuer` (uv)
+
+**Symptom:** `uv pip install -r requirements.txt` dies partway through on
+a wheel fetched by direct URL:
+
+```
+  x Failed to download `smplfitter @ https://github.com/.../smplfitter-0.2.10-py3-none-any.whl`
+  |-> client error (Connect)
+  `-> invalid peer certificate: UnknownIssuer
+```
+
+...while `git fetch` against the same host, in the same shell, succeeds.
+
+**Root cause:** uv validates TLS against its own bundled webpki roots
+rather than the OS trust store. Behind a corporate/AV TLS-inspection proxy
+the intercepting root is in the OS store but not in uv's, so uv alone
+fails. Same root cause as #3/#4 (why `ensure_ffmpeg.py` shells out to
+`curl` instead of using `requests`) — it just reaches uv by a different
+route, because `requirements.txt` pulls several deepbeepmeep wheels by
+direct GitHub URL rather than from an index.
+
+**Second, independent failure on the same step:** once certificates are
+fixed, the next wheel failed with `operation timed out`. uv's default HTTP
+timeout is 30 s, and GitHub release downloads measured **36 s for a 61 KB
+file** on the affected connection — slow enough to fail the install with
+nothing actually wrong.
+
+**Fix — env on every uv invocation** (`install.js`, `update.js`,
+`repair.js`, `rollback.js`, `torch.js`):
+
+```js
+env: { UV_SYSTEM_CERTS: "1", UV_HTTP_TIMEOUT: "180" }
+```
+
+`UV_SYSTEM_CERTS` makes uv use the OS store (schannel on Windows); it was
+`UV_NATIVE_TLS` before uv 0.11 and that name still works but warns. Both
+settings are harmless where they are not needed, hence unconditional.
+`torch.js` needs the timeout most — those are multi-GB downloads.
+Confirmed live: an update that had failed twice then completed cleanly.
+
+### 9. Generation stalls at step 0 with the GPU idle — memory profile, not the model
+
+**Symptom:** a generation that used to work sits at `0/N` for tens of
+minutes. RAM ~99% used, GPU essentially idle, one CPU core busy, disk
+quiet. Cancelling and picking a different model or text encoder does not
+help.
+
+**This is a memory-profile regression, and there is a one-line test for
+it.** Check what mmgp preloads:
+
+```
+grep -o "Async loading plan for model 'transformer' : [^|]*" logs/api/start.js/<newest>
+```
+
+| Output | Meaning |
+|---|---|
+| `base size of 58.04 MB will be preloaded with a 369.18 MB async circular shuttle` | **streaming** (profile 4) — correct on a 32 GB machine |
+| `13348.60 MB will be preloaded (base size of 58.04 MB + 72.0% of recurrent layers data)` | **preloading** — needs far more RAM than 32 GB with H3 |
+
+**Root cause:** `wgp_config.json`'s **`video_profile`** (not the global
+`profile`) drives video models. Value `3.5` — *"Profile 3+,
+VeryLowRAM_HighVRAM: at least 32 GB of RAM and 24 GB of VRAM"* — maps at
+`wgp.py:4231` to `mmgp_profile = 3` with `pinnedMemory = False`, and mmgp
+profile 3 *"will try to load **entirely** a model in VRAM"*. Profile 4
+loads *"only the needed parts"*.
+
+On a machine at exactly 3.5's stated minimum (32 GB / 24 GB), a 20B
+transformer plus a 32B text encoder does not fit, so it degrades into
+paging and starves. Profile 4 — which upstream labels **(Recommended)** —
+streams instead and works.
+
+Maestro's auto-tune writes profile settings
+(`services.auto_performance_applied: true` in `wgp_config.json`), so this
+can change without the user touching it, e.g. across an upstream update.
+
+**Fix:** set `video_profile` to `4` (Settings → Memory Profile → *"Profile
+4, LowRAM_LowVRAM (Recommended)"*). Edit `wgp_config.json` only while
+Maestro is stopped — it rewrites the file on exit. Also re-check **First
+Block Cache**; it was off in the failing runs and on in every working one.
+
+**Confirmed on an RX 7900 XTX / 32 GB / gfx1100 install:**
+
+| | profile 3.5 (stalled) | profile 4 (working) |
+|---|---|---|
+| GPU compute | idle | **95.4%** |
+| transformer preload | 13,348 MB | 58 MB |
+| python RSS | 17.6 GB | 8.5 GB |
+| packed rows | 27,783 (stalled) | **41,194 (running)** |
+
+### 9b. How to read the counters (they mislead if you don't)
+
+- **The Windows GPU compute counter does work for ROCm/HIP.**
+  `Get-Counter '\GPU Engine(*engtype_Compute)\Utilization Percentage'`
+  reads ~95% during a healthy generation, so a near-zero reading is real
+  evidence the GPU is idle — not a broken counter. An earlier revision of
+  this file claimed otherwise; that was wrong.
+- **A high hard-fault rate is not automatically thrashing.** Profile 4
+  streams weights through a ~369 MB circular shuttle, so ~30,000
+  pages/sec (~124 MB/s) is *normal and healthy* — provided GPU compute
+  stays saturated. Starvation looks like the opposite: a *low* fault rate
+  **and** an idle GPU. Read the two together, never separately.
+- **One CPU core pegged means nothing on its own.** That is what a
+  PyTorch dispatch loop looks like from the host side; it appears in both
+  the healthy and the starved case.
+
+**Method note.** Diagnosing this took a long detour through the H3 text
+encoder (NVFP4 vs GGUF) that was entirely a red herring — the failing run
+was already on the *smaller* encoder. What settled it was diffing
+`logs/api/start.js/*` between a known-good run and a failing one. Those
+logs record the profile, preload plan, cache state, encoder, step count
+and packed rows for every generation. **Diff the logs before theorising.**
 
 ## Do not
 

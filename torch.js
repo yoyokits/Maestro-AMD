@@ -55,7 +55,14 @@ module.exports = async (kernel) => {
   const winWheel = (indexUrl) => ({
     method: "shell.run",
     params: {
-      env: { UV_SKIP_WHEEL_FILENAME_CHECK: "1" },
+      env: {
+        UV_SKIP_WHEEL_FILENAME_CHECK: "1",
+        // See CLAUDE.md #8 — uv's bundled CA roots fail behind TLS
+        // inspection, and its 30s default timeout is far too short
+        // for multi-GB wheel downloads.
+        UV_SYSTEM_CERTS: "1",
+        UV_HTTP_TIMEOUT: "180",
+      },
       venv: "{{args && args.venv ? args.venv : null}}",
       venv_python: "{{args && args.venv_python ? args.venv_python : null}}",
       path: `{{args && args.path ? args.path : '${runtime.path}'}}`,
@@ -89,6 +96,8 @@ module.exports = async (kernel) => {
   const linuxSteps = (!isWin && kernel.platform === "linux") ? [{
     method: "shell.run",
     params: {
+      // See CLAUDE.md #8.
+      env: { UV_SYSTEM_CERTS: "1", UV_HTTP_TIMEOUT: "180" },
       venv: "{{args && args.venv ? args.venv : null}}",
       venv_python: "{{args && args.venv_python ? args.venv_python : null}}",
       path: `{{args && args.path ? args.path : '${runtime.path}'}}`,
@@ -122,3 +131,10 @@ module.exports = async (kernel) => {
     ],
   }
 }
+
+// Exposed so sam_install.js can resolve the same wheel index for its
+// separate Python 3.12 environment without duplicating the table.
+// Assigned after module.exports so it isn't overwritten.
+module.exports.WIN_WHEEL_INDEXES = WIN_WHEEL_INDEXES
+module.exports.LINUX_INDEX_URL = "https://download.pytorch.org/whl/rocm7.2"
+module.exports.LINUX_TORCH_PINS = "torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0"

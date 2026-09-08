@@ -90,11 +90,23 @@ Windows and Linux are both supported. macOS is not (ROCm doesn't run there).
 - **Output quality is identical to the NVIDIA version.** Quality comes from
   the model weights, not the GPU brand — an AMD card and an NVIDIA card
   running the same model produce the same kind of results.
-- **Speed is usually a bit behind an equivalent-tier NVIDIA card.** NVIDIA
-  has optimized attention kernels (FlashAttention, SageAttention) that have
-  no ROCm equivalent yet, so this wrapper falls back to PyTorch's standard
-  attention path. It works, it's just not the fastest path available on
-  NVIDIA.
+- **Speed is usually a bit behind an equivalent-tier NVIDIA card.** The
+  NVIDIA build installs extra acceleration libraries — quantized attention
+  (SageAttention), FlashAttention, and 4-bit inference kernels — that either
+  have no ROCm build or aren't packaged for AMD on Windows. This wrapper
+  uses PyTorch's own attention path instead. It works; it just isn't the
+  fastest path that exists on NVIDIA. (Developers: `PERFORMANCE.md` has the
+  full accounting and what's worth closing.)
+- **Some GPUs can't do fast attention at all.** On RDNA 2 (RX 6000) and the
+  Ryzen AI APUs, AMD's accelerated attention kernels may be missing
+  entirely, which means long or high-resolution generations can fail with an
+  out-of-memory error no matter how much VRAM you have. **Run Diagnose** —
+  it tells you directly whether your card is affected. RX 7000/9000 series
+  are unaffected.
+- **"llama.cpp CUDA kernels unavailable" in the console is expected.** Those
+  kernels are NVIDIA-only. GGUF models still work; the conversion step just
+  runs on the CPU, so they load more slowly. Not a bug, and nothing to fix
+  on your end.
 - **Windows ROCm support is newer and less battle-tested than Linux.** AMD
   ships Windows PyTorch wheels from a nightly/staging channel (there's no
   stable Windows ROCm PyTorch release yet as of this writing), so expect
@@ -114,29 +126,40 @@ Windows and Linux are both supported. macOS is not (ROCm doesn't run there).
   full model collection across every feature exceeds 300 GB. Nothing
   downloads until you actually pick a model to use.
 
-### ⚠️ Before using MiniMax H3: change one setting or risk a system hang
+### AMD-specific defaults are set for you
 
-Maestro's **MiniMax H3** models (Omni, First/Last, Full, etc.) default to an
-**NVFP4** text encoder — an NVIDIA-only format, despite being labeled
-"Recommended" in the UI. On AMD there's no GPU kernel for it, so it silently
-falls back to running a 32-billion-parameter model on your **CPU**. Combined
-with how much RAM the rest of the model needs, this can push your system into
-heavy memory-swap territory — bad enough that Windows itself becomes
-unresponsive and won't recover without a hard reset. This isn't something the
-AMD wrapper can fix for you automatically — it's a per-generation setting
-inside Maestro itself.
+A few of Maestro's stock settings assume an NVIDIA GPU. This wrapper now
+corrects them automatically on every Install, Update and Start — you don't
+need to do anything. Listed here so you know what changed and why:
 
-**Fix — do this once before your first MiniMax H3 generation:**
+- **MiniMax H3 text encoder → GGUF Q4_K_M** (was *NVFP4 AWQ
+  "(Recommended)"*). NVFP4 is an NVIDIA-only format and the "Recommended"
+  label doesn't account for AMD. Left alone it could **hang your whole
+  machine badly enough to need a hard reset.** That no longer happens, and
+  you download the ~14.6 GB encoder you can use instead of the ~15.7 GB one
+  you can't.
 
-1. Select any MiniMax H3 model, then open **Advanced Settings**.
-2. Find **"H3 Text Encoder"** and change it from **NVFP4 AWQ (Recommended)**
-   to **GGUF Q4_K_M** (or **GGUF Q2_K** if you're tight on RAM). The
-   "Recommended" label doesn't account for AMD GPUs — GGUF is the one that
-   actually runs correctly here.
-3. In **Settings → Services**, leave **LLM Device** set to **CPU** — that's
-   the correct choice for everyone (not AMD-specific), since it keeps the
-   local Director planning LLM off your GPU so it doesn't compete with video
-   generation for VRAM.
+  Only the dangerous NVFP4 value is ever changed — if you pick a different
+  encoder under **Advanced Settings → "H3 Text Encoder"**, your choice is
+  kept. **GGUF Q2_K** (~8.5 GB) is the option if you're short on RAM.
+
+  H3 is a heavy model either way — it's a large transformer with a 32B text
+  encoder, and its sparse-attention mode needs Triton, which AMD doesn't
+  ship on Windows, so it uses standard attention. It works; it's just not
+  the quickest thing in Maestro. If an H3 generation seems stuck, check
+  whether you've selected a **"Fused 4-Step (Experimental)"** variant —
+  those are the ones that have caused trouble here.
+
+- **Attention mode → `auto`** if it was ever set to Sage, Flash or
+  xformers. None of those are installed on AMD, and `auto` picks the right
+  backend for your hardware.
+
+One setting still worth checking yourself: in **Settings → Services**, leave
+**LLM Device** set to **CPU**. That's correct for everyone, not just AMD — it
+keeps the Director planning LLM off your GPU so it doesn't compete with video
+generation for VRAM.
+
+Run **Diagnose** any time to confirm these are in place.
 
 ## Installing
 
@@ -157,10 +180,49 @@ inside Maestro itself.
   is the easiest way to stay current; recommended as your everyday launch
   button.
 - **Update** — just pull the latest Maestro without starting it.
+
+### If something goes wrong
+
+Try these in order — the first three all keep your downloaded models.
+
+- **Diagnose** — prints a health report: which GPU was detected, whether
+  PyTorch found it, whether fast attention is actually available, and what's
+  missing. **Please include this output when reporting a problem.**
+- **Roll back last update** — Maestro updates track upstream's latest
+  version, so occasionally a new version breaks something. This returns you
+  to the version you were on before your last Update. Only appears once
+  you've run Update at least once.
+- **Repair** — rebuilds the Python environment and the interface from
+  scratch without touching your models, LoRAs, or generated outputs. This is
+  the right fix for a broken or half-finished install.
 - **Reset** — removes Maestro and the Python environment entirely (a clean
-  slate). Your downloaded models, LoRAs, and generated outputs live inside
-  the same folder Reset deletes, so back them up first if you want to keep
-  them.
+  slate). **Your downloaded models, LoRAs, and generated outputs live inside
+  the folder Reset deletes**, so try Repair first, and back them up if you
+  want to keep them.
+
+### "Torch not compiled with CUDA enabled"
+
+If Maestro crashes on start with this, look a few lines above it for:
+
+```
+[Runtime] PyTorch 2.14.0+cpu | CUDA none | CUDA unavailable
+```
+
+The `+cpu` is the problem — a dependency update replaced the AMD ROCm
+version of PyTorch with a CPU-only one. **Click Update**; it now detects
+this and reinstalls the correct version automatically. If that doesn't
+work, click **Repair** (keeps your models).
+
+Ignore the `Triton=missing`, `SageAttention=missing`, `FlashAttention is
+unavailable` and `llama.cpp CUDA kernels unavailable` lines — those are
+normal on AMD and appear on healthy installs too.
+
+### Optional extras
+
+- **Install Inpaint Support** — adds SAM 3.1 segmentation, used by the
+  experimental Inpaint mode. Installed separately because it takes several
+  extra minutes and most people won't need it. It lives in its own isolated
+  environment, so it can't disturb the main install. Experimental on AMD.
 
 ## Licensing
 
