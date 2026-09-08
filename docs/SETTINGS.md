@@ -3,9 +3,6 @@
 **A known-good starting configuration for Maestro on AMD**, taken from generations that
 actually completed — not from theory. Start here, confirm it runs, then experiment outward.
 
-> There is a styled version of this page at [`settings.html`](settings.html), which renders
-> once GitHub Pages is enabled for this repository. Keep the two in sync when editing.
-
 Measured on:
 
 | GPU | Target | VRAM | System RAM | OS |

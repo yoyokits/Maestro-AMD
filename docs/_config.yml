@@ -1,0 +1,12 @@
+# GitHub Pages configuration.
+#
+# Jekyll renders every .md in this folder into a styled page, so
+# docs/SETTINGS.md is the single source: it renders on github.com as
+# Markdown and on the Pages site as HTML. Do not add a .nojekyll file
+# here -- that switches Jekyll off and the Markdown is served as raw
+# text instead of a page.
+#
+# To publish: Settings > Pages > Source: Deploy from a branch > main /docs
+title: Maestro AMD
+description: AMD ROCm wrapper for Maestro - setup, proven settings, and troubleshooting
+theme: jekyll-theme-cayman
