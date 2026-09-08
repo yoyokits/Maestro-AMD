@@ -1,0 +1,660 @@
+<title>Maestro AMD Playbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --paper:      #F5F6F7;
+    --surface:    #FFFFFF;
+    --surface-2:  #EAECEF;
+    --ink:        #1A1D21;
+    --ink-2:      #3D444C;
+    --muted:      #5D656E;
+    --rule:       #D6DADF;
+    --accent:     #0F5F8A;
+    --accent-soft:#E3EEF4;
+    --proven:     #17705A;
+    --proven-soft:#DFEDE8;
+    --caution:    #96591B;
+    --caution-soft:#F6EBDB;
+    --fail:       #A32C1B;
+    --fail-soft:  #F7E5E1;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body:    "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    --mono:    "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+    --measure: 68ch;
+    --pad: clamp(1.25rem, 4vw, 3rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #14171A;
+      --surface:    #1B1F23;
+      --surface-2:  #23282D;
+      --ink:        #EDEFF1;
+      --ink-2:      #C2C8CE;
+      --muted:      #939BA4;
+      --rule:       #333A41;
+      --accent:     #61B3DA;
+      --accent-soft:#17303E;
+      --proven:     #5FC2A3;
+      --proven-soft:#153029;
+      --caution:    #D9A05B;
+      --caution-soft:#332616;
+      --fail:       #E58273;
+      --fail-soft:  #341E1A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:      #14171A;
+    --surface:    #1B1F23;
+    --surface-2:  #23282D;
+    --ink:        #EDEFF1;
+    --ink-2:      #C2C8CE;
+    --muted:      #939BA4;
+    --rule:       #333A41;
+    --accent:     #61B3DA;
+    --accent-soft:#17303E;
+    --proven:     #5FC2A3;
+    --proven-soft:#153029;
+    --caution:    #D9A05B;
+    --caution-soft:#332616;
+    --fail:       #E58273;
+    --fail-soft:  #341E1A;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: var(--pad); }
+  .col  { max-width: var(--measure); }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    border-bottom: 3px solid var(--ink);
+    padding-bottom: 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.1rem, 5.5vw, 3.4rem);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
+    margin: 0 0 0.85rem;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 1.1rem;
+    color: var(--ink-2);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  /* ---------- rig strip ---------- */
+  .rig {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin-top: 1.75rem;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .rig div {
+    flex: 1 1 150px;
+    padding: 0.8rem 1rem;
+    border-right: 1px solid var(--rule);
+  }
+  .rig div:last-child { border-right: 0; }
+  .rig dt {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.2rem;
+  }
+  .rig dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  /* ---------- sections ---------- */
+  section { margin-top: 3.25rem; }
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(1.35rem, 3vw, 1.75rem);
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin: 0 0 0.35rem;
+    text-wrap: balance;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    display: block;
+    margin-bottom: 0.35rem;
+  }
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.03rem;
+    letter-spacing: -0.005em;
+    margin: 2rem 0 0.6rem;
+  }
+  p { margin: 0 0 1rem; max-width: var(--measure); }
+  .lede { color: var(--ink-2); margin-bottom: 1.6rem; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+  strong { font-weight: 600; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.87em;
+    background: var(--surface-2);
+    padding: 0.1em 0.36em;
+    border-radius: 3px;
+  }
+
+  /* ---------- tables ---------- */
+  .scroll { overflow-x: auto; margin: 1.1rem 0 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    min-width: 520px;
+  }
+  caption {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-bottom: 0.55rem;
+  }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 0 0.9rem 0.5rem 0;
+    border-bottom: 1.5px solid var(--ink);
+  }
+  td {
+    padding: 0.62rem 0.9rem 0.62rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  td:first-child { color: var(--ink-2); }
+  .v {
+    font-family: var(--mono);
+    font-weight: 500;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  td.note { color: var(--muted); font-size: 0.88rem; }
+
+  /* ---------- ladder ---------- */
+  .ladder { margin-top: 1.2rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .rung {
+    display: grid;
+    grid-template-columns: 2.1rem minmax(9.5rem, 1fr) 1fr auto;
+    gap: 0.9rem;
+    align-items: center;
+    padding: 0.7rem 0.9rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--proven);
+    border-radius: 3px;
+  }
+  .rung.start { border-left-color: var(--accent); background: var(--accent-soft); }
+  .rung.stop  { border-left-color: var(--fail); background: var(--fail-soft); }
+  .step-n {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .shape {
+    font-family: var(--mono);
+    font-size: 0.87rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar-track {
+    height: 7px;
+    background: var(--surface-2);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar { height: 100%; background: var(--proven); border-radius: 4px; }
+  .rung.start .bar { background: var(--accent); }
+  .rung.stop  .bar { background: var(--fail); }
+  .rows {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* ---------- callouts ---------- */
+  .callout {
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--caution);
+    background: var(--caution-soft);
+    padding: 1rem 1.15rem;
+    border-radius: 3px;
+    margin: 1.4rem 0;
+    max-width: var(--measure);
+  }
+  .callout.info { border-left-color: var(--accent); background: var(--accent-soft); }
+  .callout.good { border-left-color: var(--proven); background: var(--proven-soft); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .tag {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--caution);
+    display: block;
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+  }
+  .callout.info .tag { color: var(--accent); }
+  .callout.good .tag { color: var(--proven); }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 0.83rem;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    margin: 1rem 0;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  ul { max-width: var(--measure); padding-left: 1.15rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.45rem; }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: 0.87rem;
+    max-width: var(--measure);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    a { transition: color .15s ease; }
+  }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Maestro on AMD · Field-tested configuration</p>
+    <h1>Maestro AMD Playbook</h1>
+    <p class="standfirst">
+      A known-good starting configuration for Maestro on AMD, taken from generations that
+      actually completed on my machine — not from theory. Start here, confirm it runs, then
+      experiment outward.
+    </p>
+
+    <dl class="rig">
+      <div><dt>GPU</dt><dd>RX 7900 XTX</dd></div>
+      <div><dt>Target</dt><dd>gfx1100</dd></div>
+      <div><dt>VRAM</dt><dd>24 GB</dd></div>
+      <div><dt>System RAM</dt><dd>32 GB</dd></div>
+      <div><dt>OS</dt><dd>Windows 11</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <h2><span class="num">Read this first</span>Lower settings first. Always.</h2>
+    <p class="lede">
+      The single most common way to conclude "Maestro doesn't work on AMD" is to open it and
+      immediately ask for a long, high-resolution clip. On a 24 GB card with 32 GB of system
+      RAM, that will stall — and the stall looks exactly like a crash, because nothing prints
+      while it grinds.
+    </p>
+    <p>
+      Run the smallest generation in the ladder below <strong>first</strong>. Once you have a
+      finished video in hand, you know your install is sound, and everything after that is
+      tuning rather than debugging. Scaling up from a working baseline takes minutes. Debugging
+      a stall from a cold start can take an evening — I know, because it took mine.
+    </p>
+  </section>
+
+  <section>
+    <h2><span class="num">Step 1</span>Global settings</h2>
+    <p class="lede">
+      Set these once in <strong>Settings</strong>. They apply to every generation.
+    </p>
+
+    <div class="scroll">
+      <table>
+        <caption>Settings → Performance &amp; Services</caption>
+        <thead>
+          <tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Why</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Memory profile — <strong>Video</strong></td>
+            <td class="v">Profile 4</td>
+            <td class="note">LowRAM_LowVRAM. The important one — see Step 4.</td>
+          </tr>
+          <tr>
+            <td>Memory profile — Image</td>
+            <td class="v">Profile 3.5</td>
+            <td class="note">Images are small enough to hold in VRAM.</td>
+          </tr>
+          <tr>
+            <td>Memory profile — Audio</td>
+            <td class="v">Profile 3.5</td>
+            <td class="note">Same reasoning.</td>
+          </tr>
+          <tr>
+            <td>Attention mode</td>
+            <td class="v">auto</td>
+            <td class="note">Resolves to SDPA on AMD. Don't pick Sage or Flash — they aren't installed.</td>
+          </tr>
+          <tr>
+            <td>Transformer quantization</td>
+            <td class="v">int8</td>
+            <td class="note">Default. Keeps the model inside 24 GB.</td>
+          </tr>
+          <tr>
+            <td>Text encoder quantization</td>
+            <td class="v">int8</td>
+            <td class="note">Default.</td>
+          </tr>
+          <tr>
+            <td>LLM Device <span class="note">(Services)</span></td>
+            <td class="v">CPU</td>
+            <td class="note">Keeps the Director planning LLM off the GPU so it doesn't compete for VRAM. Correct on any vendor.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout info">
+      <span class="tag">Note</span>
+      <p>
+        Profiles are set <em>per media type</em>. Video gets 4; image and audio get 3.5. Setting
+        video to 3.5 is the mistake that cost me an evening.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">Step 2</span>The generation setup</h2>
+    <p class="lede">
+      This is the exact configuration behind every completed video below.
+      <strong>Studio → Video → References</strong>, with two reference images.
+    </p>
+
+    <div class="scroll">
+      <table>
+        <caption>Studio → Video → References</caption>
+        <thead>
+          <tr><th scope="col">Setting</th><th scope="col">Value</th><th scope="col">Why</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Mode</td>
+            <td class="v">References</td>
+            <td class="note">Two reference images — one per subject. I use one person per image.</td>
+          </tr>
+          <tr>
+            <td>Model</td>
+            <td class="v">H3 Omni — Pruned</td>
+            <td class="note">Not the "Fused 4-Step (Experimental)" variant — see the warning below.</td>
+          </tr>
+          <tr>
+            <td>LoRA</td>
+            <td class="v">minimax_h3_turbo_v4_step600_ema</td>
+            <td class="note">A turbo LoRA. This is what lets 6 steps look like far more.</td>
+          </tr>
+          <tr>
+            <td>Steps</td>
+            <td class="v">6</td>
+            <td class="note">With the turbo LoRA above. Without it you need far more.</td>
+          </tr>
+          <tr>
+            <td>Guidance scale</td>
+            <td class="v">1.0</td>
+            <td class="note">Turbo LoRAs are trained for low guidance.</td>
+          </tr>
+          <tr>
+            <td>Flow shift</td>
+            <td class="v">5.0</td>
+            <td class="note">Model default for this variant.</td>
+          </tr>
+          <tr>
+            <td>First Block Cache</td>
+            <td class="v">on · 0.08 · start 1</td>
+            <td class="note">Free speed. Enabled in nearly every successful run.</td>
+          </tr>
+          <tr>
+            <td>H3 Text Encoder</td>
+            <td class="v">GGUF Q4_K_M</td>
+            <td class="note">Weeks of successful runs. Use Q2_K if you have under 32 GB RAM.</td>
+          </tr>
+          <tr>
+            <td>Sliding window / overlap</td>
+            <td class="v">345 / 18</td>
+            <td class="note">Defaults. Left alone.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <span class="tag">Avoid for now</span>
+      <p>
+        The <strong>H3 Fused 4-Step (References, Experimental)</strong> model stalled on me
+        every time, at workloads the 6-step model handled comfortably. It's labelled
+        experimental for a reason. Get the 6-step configuration working before you try it.
+      </p>
+    </div>
+
+    <div class="callout good">
+      <span class="tag">On the text encoder</span>
+      <p>
+        If a menu offers <strong>NVFP4 AWQ (Recommended)</strong>, ignore the "Recommended".
+        NVFP4 is an NVIDIA-only format, and on AMD it can drag the whole machine into swap.
+        Recent Maestro AMD builds override this for you; older ones don't.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">Step 3</span>The ladder — start at the bottom</h2>
+    <p class="lede">
+      Every rung below is a real generation on the rig at the top. The bar shows
+      <strong>packed rows</strong> — Maestro's own measure of how much work an attention pass
+      is doing, printed in the console on every run. It scales with resolution
+      <em>and</em> frame count, which is why it predicts stalls better than either alone.
+    </p>
+
+    <div class="ladder">
+      <div class="rung start">
+        <span class="step-n">01</span>
+        <span class="shape">704×704 · 124f</span>
+        <span class="bar-track"><span class="bar" style="width:37%"></span></span>
+        <span class="rows">19,306 rows</span>
+      </div>
+      <div class="rung">
+        <span class="step-n">02</span>
+        <span class="shape">704×704 · 243f</span>
+        <span class="bar-track"><span class="bar" style="width:72%"></span></span>
+        <span class="rows">37,981 rows</span>
+      </div>
+      <div class="rung">
+        <span class="step-n">03</span>
+        <span class="shape">1280×704 · 141f</span>
+        <span class="bar-track"><span class="bar" style="width:78%"></span></span>
+        <span class="rows">41,194 rows</span>
+      </div>
+      <div class="rung">
+        <span class="step-n">04</span>
+        <span class="shape">736×736 · 243f</span>
+        <span class="bar-track"><span class="bar" style="width:79%"></span></span>
+        <span class="rows">41,832 rows</span>
+      </div>
+      <div class="rung">
+        <span class="step-n">05</span>
+        <span class="shape">704×704 · 345f</span>
+        <span class="bar-track"><span class="bar" style="width:100%"></span></span>
+        <span class="rows">52,781 rows</span>
+      </div>
+      <div class="rung stop">
+        <span class="step-n">✕</span>
+        <span class="shape">Fused 4-step · any</span>
+        <span class="bar-track"><span class="bar" style="width:70%"></span></span>
+        <span class="rows">stalled</span>
+      </div>
+    </div>
+
+    <h3>Start at rung 01</h3>
+    <p>
+      <strong>704×704, 124 frames, 6 steps.</strong> Low resolution, short duration, few steps.
+      It is not meant to be your final output — it is meant to prove the install works and give
+      you a timing baseline. Once it finishes, note how long it took.
+    </p>
+    <p>
+      Then move up one rung at a time. Rungs 02–04 are all comfortable here. Rung 05 is the
+      heaviest thing I've completed, and it needed 8 steps with the cache off — treat it as the
+      ceiling, not a starting point.
+    </p>
+
+    <div class="callout info">
+      <span class="tag">Reading the console</span>
+      <p>
+        Maestro prints a line like this on every run. The packed-row figure is the number to
+        compare against the ladder:
+      </p>
+      <pre><code>[MiniMax H3 Perf] 736x736, 243 frames/10.12s, 41,832 packed rows,
+6 steps; attention=sdpa, cache=first-block/0.08</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">Step 4</span>Why the video profile matters most</h2>
+    <p class="lede">
+      Of everything on this page, this is the setting most likely to make the difference between
+      "works" and "appears frozen".
+    </p>
+    <p>
+      <strong>Profile 3.5</strong> ("VeryLowRAM_HighVRAM") tries to load the model
+      <em>entirely</em> into VRAM. Its stated minimum is 32 GB RAM and 24 GB VRAM — exactly this
+      rig — and with a 20B transformer plus a 32B text encoder it still doesn't fit. It falls
+      back to paging and starves.
+    </p>
+    <p>
+      <strong>Profile 4</strong> ("LowRAM_LowVRAM", which Maestro itself marks
+      <em>Recommended</em>) streams only the parts it needs. Same generation, same model, less
+      than half the RAM.
+    </p>
+
+    <div class="scroll">
+      <table>
+        <caption>Same job, same machine — profile 3.5 vs 4</caption>
+        <thead>
+          <tr><th scope="col">Signal</th><th scope="col">Profile 3.5</th><th scope="col">Profile 4</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Transformer preloaded</td><td class="v">13,348 MB</td><td class="v">58 MB</td></tr>
+          <tr><td>Process RAM</td><td class="v">17.6 GB</td><td class="v">8.5 GB</td></tr>
+          <tr><td>GPU compute</td><td class="v">idle</td><td class="v">95%</td></tr>
+          <tr><td>Result</td><td class="v">stalled at step 0</td><td class="v">completed</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:1.2rem">
+      You can check which mode you're in from the console at model-load time. Look for this line:
+    </p>
+    <pre><code>Async loading plan for model 'transformer' :
+  base size of 58.04 MB will be preloaded ...        ← streaming, good
+  13348.60 MB will be preloaded (+72% of layers) ... ← preloading, will starve 32 GB</code></pre>
+  </section>
+
+  <section>
+    <h2><span class="num">Step 5</span>Once it works, then experiment</h2>
+    <p class="lede">
+      Everything above is the part I'd call proven. Below is the part worth exploring — but only
+      after you have a finished video, so you always have a working configuration to fall back to.
+    </p>
+
+    <h3>Change one thing at a time</h3>
+    <ul>
+      <li><strong>Other LoRAs.</strong> The turbo LoRA is what makes 6 steps viable. Swapping it usually means raising steps — expect to re-tune both together.</li>
+      <li><strong>Other H3 variants.</strong> Omni, First/Last, Full. Same profile and encoder settings apply; start each new variant back at rung 01.</li>
+      <li><strong>Text encoders.</strong> Q2_K is lighter on RAM and noticeably faster to load; larger encoders cost RAM you may not have spare.</li>
+      <li><strong>Other model families.</strong> Wan 2.x and LTX use small, GPU-resident text encoders, so they load faster and lean harder on the GPU. Good options if H3 feels heavy.</li>
+      <li><strong>Longer clips.</strong> Frame count drives packed rows fast. Add frames before you add resolution.</li>
+    </ul>
+
+    <div class="callout">
+      <span class="tag">If something stalls</span>
+      <p>
+        Change back the one setting you just changed. If it's still stuck: check the video
+        profile is 4, check the packed-row count against the ladder, and run
+        <strong>Diagnose</strong> from the Pinokio menu — it reports your GPU, PyTorch build,
+        and whether fast attention is actually available on your card.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      Measured on a Radeon RX 7900 XTX (gfx1100, 24 GB) with 32 GB system RAM on Windows 11,
+      using Maestro AMD. Numbers come from Maestro's own console output across runs that
+      completed. Other cards — especially RDNA 2 and the Ryzen AI APUs — may behave differently;
+      run Diagnose to see what yours reports.
+    </p>
+  </footer>
+
+</div>

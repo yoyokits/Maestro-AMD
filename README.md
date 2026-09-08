@@ -85,6 +85,18 @@ same models and features run on AMD hardware.
 
 Windows and Linux are both supported. macOS is not (ROCm doesn't run there).
 
+### Proven settings
+
+Before your first generation, read the
+**[Maestro AMD Playbook](docs/SETTINGS.md)** — a known-good configuration measured on a real
+RX 7900 XTX, with a start-small ladder to work up from. It covers the memory profile that
+most often makes the difference between "works" and "appears frozen", and the settings behind
+generations that actually completed.
+
+**Start with the smallest setting in that ladder.** A stall on AMD looks exactly like a
+crash, because nothing prints while it grinds — so prove the install works on a short,
+low-resolution clip before asking for anything ambitious.
+
 ### Honest performance notes
 
 - **Output quality is identical to the NVIDIA version.** Quality comes from
