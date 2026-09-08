@@ -146,3 +146,11 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 /ChooseClaudeCode.bat
+
+# Maestro AMD wrapper
+/Maestro/
+# Wrapper-local state: rollback point, UI build record. Kept OUTSIDE
+# Maestro/ so repair.js's `git clean -fdx` can't wipe it.
+/.maestro_state/
+# Optional per-machine env overrides for start.js (see PERFORMANCE.md §5)
+/user_env.json

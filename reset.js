@@ -9,5 +9,9 @@ module.exports = {
   run: [
     { method: "fs.rm", params: { path: "Maestro" } },
     { method: "fs.rm", params: { path: "env-amd" } },
+    // Wrapper-local state (rollback point, UI build record). Lives
+    // outside Maestro/ so repair.js's git clean cannot destroy it —
+    // but a full Reset should clear it.
+    { method: "fs.rm", params: { path: ".maestro_state" } },
   ],
 }

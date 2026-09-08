@@ -45,6 +45,40 @@ def _platform_key():
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
 
 
+def _safe_extract(zf, dest):
+    """Extract without letting archive members escape `dest`.
+
+    zipfile.extractall() will happily honour absolute paths and `..`
+    segments in member names. This archive comes from a source we trust,
+    but "trusted today" is not a property worth depending on for code
+    that writes executables next to the interpreter.
+    """
+    dest = dest.resolve()
+    for member in zf.infolist():
+        target = (dest / member.filename).resolve()
+        if target != dest and dest not in target.parents:
+            raise RuntimeError(
+                f"refusing to extract {member.filename!r}: escapes {dest}"
+            )
+    zf.extractall(dest)
+
+
+def _verify(path, name):
+    """Confirm the copied binary actually runs before declaring success."""
+    try:
+        r = subprocess.run(
+            [str(path), "-version"], capture_output=True, text=True, timeout=60
+        )
+    except OSError as exc:
+        raise RuntimeError(f"{name} was installed but will not execute: {exc}")
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"{name} was installed but exited {r.returncode} on -version"
+        )
+    first = r.stdout.splitlines()[0] if r.stdout else "(no version banner)"
+    print(f"[ensure_ffmpeg] verified {name}: {first}")
+
+
 def main():
     key = _platform_key()
     ext = ".exe" if sys.platform == "win32" else ""
@@ -57,6 +91,14 @@ def main():
         print(f"[ensure_ffmpeg] already present: {ffmpeg_dest}, {ffprobe_dest}")
         return
 
+    if shutil.which("curl") is None:
+        raise RuntimeError(
+            "curl not found on PATH. This script deliberately avoids Python's "
+            "requests/certifi (see the module docstring) and needs curl to "
+            "fetch ffmpeg. Install curl, or drop ffmpeg and ffprobe into "
+            f"{bin_dir} manually."
+        )
+
     url = f"{FFMPEG_BINS_BASE_URL}/{key}.zip"
 
     with tempfile.TemporaryDirectory() as tmp_str:
@@ -67,15 +109,18 @@ def main():
         subprocess.run(["curl", "-fL", "-o", str(zip_path), url], check=True)
 
         with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(tmp)
+            _safe_extract(zf, tmp)
 
         src_dir = tmp / key
         for name, dest in ((f"ffmpeg{ext}", ffmpeg_dest), (f"ffprobe{ext}", ffprobe_dest)):
             src = src_dir / name
+            if not src.exists():
+                raise RuntimeError(f"{name} missing from {url}")
             shutil.copy2(src, dest)
             mode = os.stat(dest).st_mode
             os.chmod(dest, mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
             print(f"[ensure_ffmpeg] {name} -> {dest}")
+            _verify(dest, name)
 
 
 if __name__ == "__main__":

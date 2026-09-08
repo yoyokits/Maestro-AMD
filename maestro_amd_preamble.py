@@ -1,7 +1,6 @@
-"""Maestro AMD wrapper preamble — copied into env-amd's site-packages by
-install.js/update.js. CPython auto-loads sitecustomize.py at interpreter
-startup, before any user code runs, so this pre-populates sys.modules
-before Maestro's own imports execute.
+"""Maestro AMD wrapper preamble — installed into env-amd's site-packages
+by install_preamble.py, and executed at interpreter startup via the
+companion maestro_amd_preamble.pth file.
 
 **What this works around**
 
@@ -19,23 +18,35 @@ real module ever loads means Python's `from torch.distributed.fsdp import
 ...` finds our fake in the cache and skips running the real
 fsdp/__init__.py entirely — the crashing import chain never executes.
 
-**Why this approach and not others**
+**Why a .pth file and not sitecustomize.py**
+
+This was originally shipped as `sitecustomize.py`. That works, but
+site-packages has room for exactly **one** sitecustomize module: if any
+dependency ever ships its own, one silently clobbers the other and the
+FSDP crash returns with no diagnostic. Any number of `.pth` files
+coexist, and a `.pth` line beginning with `import` is executed by site.py
+during startup — slightly *earlier* than sitecustomize, and composably.
+Same mechanism, same guarantees, no single-occupancy hazard.
+
+**Why this shape and not others**
 
 - Not a source patch to Maestro/app/models/wan/distributed/fsdp.py.
   A source patch works (was the original solution here — see git history
   for patch_fsdp.py) but is inherently invasive and has to be re-applied
-  after every Update since `git reset --hard` wipes it. sitecustomize.py
-  lives in the venv, which Update never touches — self-heals for free.
-- Not a runtime probe. This file **must NEVER import
-  torch.distributed.fsdp** — nor call anything (like
+  after every Update since `git reset --hard` wipes it. This file lives
+  in the venv, which Update never touches — self-heals for free.
+- Not a runtime probe. This file **must NEVER import torch at all** —
+  not `torch`, not `torch.distributed`, and above all not
+  `torch.distributed.fsdp`; nor call anything (like
   torch.distributed.is_available()) that could transitively trigger the
-  real fsdp/__init__.py. On this ROCm-for-Windows nightly, running that
-  import can spawn a runaway offload-arch.exe process storm (hundreds of
-  processes in a loop) due to a bug in AMD's ROCm/TheRock Windows
-  toolchain. Confirmed by direct observation twice, at wildly different
-  severity. Only writing to sys.modules unconditionally — without probing
-  — avoids the storm entirely; verified live with a continuous-kill
-  watchdog primed.
+  real fsdp/__init__.py. On this ROCm-for-Windows nightly, importing
+  torch from a startup hook spawns a runaway offload-arch.exe process
+  storm (hundreds of processes in a loop): ROCm's `offload-arch` is
+  itself a Python console script, so it re-runs this hook, which imports
+  torch again, which spawns offload-arch again. Confirmed by direct
+  observation twice, at wildly different severity. Writing to sys.modules
+  unconditionally — never importing, never probing — avoids the storm
+  entirely; verified live with a continuous-kill watchdog primed.
 - Not `sys.modules['torch.distributed.fsdp'] = None`. That signals to
   Python's import machinery that the module doesn't exist and turns
   future `from torch.distributed.fsdp import X` into an ImportError,
@@ -48,8 +59,8 @@ works, this stub still wins the sys.modules race and shadows the real
 module — so multi-GPU FSDP would break. That's acceptable here because
 Maestro AMD is a single-GPU inference wrapper and shard_model() is never
 invoked. If the upstream bug ever gets fixed and multi-GPU support is
-wanted, delete this file (and its copy step in install.js/update.js) and
-Maestro will use the real fsdp again.
+wanted, delete this file, its .pth, and the install step in
+install.js/update.js, and Maestro will use the real fsdp again.
 """
 import sys
 import types
@@ -61,7 +72,11 @@ def _install_fsdp_shadow():
 
     fsdp = types.ModuleType("torch.distributed.fsdp")
     fsdp.__path__ = []
+    # Lets diagnose.py distinguish our stub from a real module without
+    # importing anything.
+    fsdp.__maestro_amd_stub__ = True
     wrap = types.ModuleType("torch.distributed.fsdp.wrap")
+    wrap.__maestro_amd_stub__ = True
 
     class _Unavailable:
         def __init__(self, *args, **kwargs):
@@ -89,4 +104,5 @@ def _install_fsdp_shadow():
 try:
     _install_fsdp_shadow()
 except Exception:
+    # A startup hook must never be able to break the interpreter.
     pass
