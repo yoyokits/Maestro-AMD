@@ -73,8 +73,28 @@ def info(msg):
 
 
 # --------------------------------------------------------------------
+def _wrapper_version():
+    """Version of THIS wrapper, from its git tag.
+
+    Distinct from the Maestro revision reported below, and from
+    pinokio.js's `version` field (which is the Pinokio script schema
+    version, not an app version -- see CHANGELOG.md).
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(REPO), "describe", "--tags", "--always", "--dirty"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return "unknown (not a git checkout?)"
+
+
 def check_host():
     section("Host")
+    info(f"wrapper       Maestro AMD {_wrapper_version()}")
     info(f"platform      {sys.platform} / {platform.machine()}")
     info(f"os            {platform.platform()}")
     info(f"python        {sys.version.split()[0]} ({sys.executable})")
