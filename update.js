@@ -6,6 +6,17 @@ const UV_ENV = { UV_SYSTEM_CERTS: "1", UV_HTTP_TIMEOUT: "180" }
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
 
+  // Progress announcements. Pinokio writes each shell.run step to its own
+  // log file and the terminal shows only the current step, so a long
+  // silent step (uv resolve, npm install) looks like a freeze. These cost
+  // nothing and tell the user which phase they are in.
+  let phaseNo = 0
+  const PHASES = 9
+  const phase = (text) => ({
+    method: "log",
+    params: { raw: `=== [${++phaseNo}/${PHASES}] ${text} ===` },
+  })
+
   // path MUST be runtime.path — Pinokio resolves `venv` relative to it.
   // See CLAUDE.md "Venv layout pitfall".
   const helper = (script, args = "") => ({
@@ -31,11 +42,13 @@ module.exports = async (kernel) => {
       // "Roll back last update" has somewhere to go. Upstream Maestro
       // moves fast; without this a bad upstream commit leaves Reset —
       // which deletes every downloaded model — as the only escape.
+      phase("Saving a rollback point"),
       helper("update_state.py", "record"),
       // Pull latest upstream Maestro. `git reset --hard origin/HEAD`
       // matches upstream's tracked files exactly while leaving untracked
       // user data (models, LoRAs, outputs, wgp_config.json — all
       // git-ignored inside Maestro/app/) intact.
+      phase("Fetching the latest Maestro"),
       {
         method: "shell.run",
         params: {
@@ -50,7 +63,9 @@ module.exports = async (kernel) => {
       // away the venv — see install.js and CLAUDE.md #1. Cheap; overwrites
       // in place. Also migrates installs still carrying the older
       // sitecustomize.py hook.
+      phase("Installing the startup preamble"),
       helper("install_preamble.py"),
+      phase("Installing Python dependencies (this is the slow one)"),
       // Python deps may have moved between upstream commits.
       {
         method: "shell.run",
@@ -68,6 +83,7 @@ module.exports = async (kernel) => {
       // Catch the case where the requirements pass replaced the ROCm torch
       // with a CUDA or CPU build (a new upstream pin can do this). Writes
       // .torch_needs_reinstall, which the next step acts on. CLAUDE.md #7.
+      phase("Verifying the ROCm PyTorch build"),
       helper("verify_rocm_torch.py"),
       // Skip the multi-GB ROCm wheel reinstall unless the marker is gone
       // or the verify step above found the wrong build.
@@ -84,9 +100,11 @@ module.exports = async (kernel) => {
         },
       },
       // Cheap no-op once already provisioned — see CLAUDE.md #3/#4.
+      phase("Checking ffmpeg / ffprobe"),
       helper("ensure_ffmpeg.py"),
       // Re-assert AMD-appropriate defaults; upstream may have added new
       // model variants that need the same override. See CLAUDE.md #6.
+      phase("Applying AMD-specific defaults"),
       helper("configure_amd_defaults.py"),
       // Self-heal the seedvc component if the user deleted it or an
       // earlier install was interrupted before this step ran.
@@ -102,7 +120,13 @@ module.exports = async (kernel) => {
       // upstream commits don't touch ui/ at all — this makes the everyday
       // "Update & Start" path much faster. Fails open (schedules the
       // rebuild) on any doubt.
+      phase("Checking whether the web UI needs rebuilding"),
       helper("update_state.py", "ui-check"),
+      {
+        when: "{{exists('Maestro/ui/package.json') && exists('.maestro_state/ui_rebuild')}}",
+        method: "log",
+        params: { raw: "=== [9/9] Rebuilding the web UI (npm - takes a minute) ===" },
+      },
       {
         when: "{{exists('Maestro/ui/package.json') && exists('.maestro_state/ui_rebuild')}}",
         method: "shell.run",
@@ -115,6 +139,10 @@ module.exports = async (kernel) => {
         },
       },
       helper("update_state.py", "ui-done"),
+      {
+        method: "log",
+        params: { raw: "=== Update complete. Click Start, or Diagnose if anything looks wrong. ===" },
+      },
     ],
   }
 }
