@@ -229,6 +229,65 @@ Ignore the `Triton=missing`, `SageAttention=missing`, `FlashAttention is
 unavailable` and `llama.cpp CUDA kernels unavailable` lines — those are
 normal on AMD and appear on healthy installs too.
 
+### A generation finishes but the video is solid grey
+
+The clip saves, but it's a tiny file (~50 KB) and every frame is flat
+grey. You may also see an *"AMD software detected that a driver timeout
+has occurred"* popup near the end.
+
+**If you're using MiniMax H3: check your text encoder first.** In
+**Advanced Settings → "H3 Text Encoder"**, make sure it's **GGUF Q4_K_M**
+(the default). The smaller **GGUF Q2_K** option is a low-RAM fallback and
+has been seen to produce solid-grey output on AMD — the same result every
+time, surviving reboots and rollbacks, because the encoder itself is
+feeding the generator nonsense. Switch to Q4_K_M and try again.
+
+**If it's already on Q4_K_M**, a model file may actually be damaged (a
+download interrupted by a crash or cancelled job). Run **Repair**
+(rebuilds the environment, keeps your models); if that doesn't clear it,
+**Reset** and reinstall. The H3 files live in
+`Maestro/app/ckpts/minimax_h3/` if you want to delete a suspect one by
+hand and let Maestro re-fetch it.
+
+**The "driver timeout" popup** is usually a *side effect* of the above,
+not the cause: when your machine is low on RAM, the doomed final decode
+crawls for many minutes — long enough for Windows' graphics watchdog to
+reset the GPU. The **"Don't ask me again (Disables issue detection)"**
+checkbox in that dialog only hides the message; it doesn't fix anything.
+Leave it unchecked.
+
+### A generation freezes (progress bar stuck, GPU idle, RAM at ~100%)
+
+Your machine is out of memory and swapping to disk. H3 is a large model;
+this app is tuned for 24 GB VRAM / 32 GB RAM and gets tight below that.
+
+- **Free up RAM first.** Close other programs — web browsers especially.
+  If you've had several failed generations in a row, **restart Maestro**
+  (Stop, then Start) — its memory use grows with each failure. A reboot
+  before a big H3 job is worth it. Keep **Settings → Services → LLM Device
+  = CPU**.
+- **Generate smaller, then work up.** Lower the resolution, use fewer
+  frames or shorter clips, cut the number of reference images, leave
+  **First Block Cache** on. Get one clean result, then raise settings a
+  step at a time until it fails — that's your ceiling on this machine.
+- Avoid the **"Fused 4-Step (Experimental)"** H3 variants, and don't queue
+  several big H3 jobs in one session — the first generation after a fresh
+  **Start** is the most reliable.
+- The **Settings → System → "VAE Tiling"** dropdown has *no effect on H3*
+  (H3 tiles its own decode already) — it only helps Wan, LTX and Hunyuan.
+
+**Only for large generations that time out on a genuinely slow GPU** (not
+for the grey-output case above): you can give Windows' graphics watchdog
+more patience. In an **Administrator** Command Prompt:
+
+```
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 60 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDdiDelay /t REG_DWORD /d 60 /f
+```
+
+then **reboot**. To undo, set both back to `2` and `5`, or delete them.
+(Linux has no equivalent — this is Windows-only.)
+
 ### Optional extras
 
 - **Install Inpaint Support** — adds SAM 3.1 segmentation, used by the

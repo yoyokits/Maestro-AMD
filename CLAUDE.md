@@ -703,6 +703,89 @@ was already on the *smaller* encoder. What settled it was diffing
 logs record the profile, preload plan, cache state, encoder, step count
 and packed rows for every generation. **Diff the logs before theorising.**
 
+### 10. Flat-grey output (a ~49 KB mp4 of solid RGB(128,128,128))
+
+**Symptom:** an H3 generation runs to `[6/6] VAE Decoding`, the run
+reports `Task 1 completed` / `New video saved`, and the saved mp4 is
+**~48–51 KB** — every frame flat grey. Often (not always) an *"AMD
+software detected that a driver timeout has occurred"* dialog appears near
+the end. Same seed → **byte-identical** output. Survives reboots and a
+Maestro rollback.
+
+**What fixed it (2026-09-10, after a long wrong-tree chase — fp8 NaN,
+v2.1.4 VAE rewrite, TDR, MIOpen cache all ruled out):
+switching H3 Text Encoder from GGUF Q2_K to GGUF Q4_K_M.** Same seed /
+640×640, real 9.1 MB video first try where Q2_K had produced grey.
+
+**Root cause not fully pinned, but the working theory is: the 2-bit Q2_K
+GGUF encoder is unreliable for H3 on this ROCm build.** Its embeddings are
+marginal enough that some workloads tip into producing near-garbage
+conditioning → the transformer emits a near-constant latent → the VAE
+decodes it to mid-grey. This is consistent with #6b: **Q4_K_M is the
+field-proven encoder and the `configure_amd_defaults.py` default; Q2_K was
+never recommended, only offered as a low-RAM fallback.** A user who has
+set Q2_K by hand and hits flat-grey output should be moved back to Q4_K_M
+first, before anything else.
+
+Not conclusively proven because the successful run also cut frames
+175→141; but Q2_K had already failed at 640×640/175 where Q4_K_M/141
+succeeded, and Q2_K failed across 640–768 resolution, so the encoder is
+the far more likely variable. (An earlier revision of this note claimed
+the Q2_K *file* was corrupt, mtime-matched to the failure onset — that was
+a misread date; the file is the original 09-08 download, unchanged, and it
+produced good videos earlier that same day. Deleting/redownloading it is
+not the fix; switching encoder is.)
+
+**Why it mimics a hardware/driver fault:**
+
+| Grey-out clue | What it means |
+|---|---|
+| Same seed → byte-identical grey mp4 | Deterministic — bad conditioning, not a race |
+| Survives reboot / "Roll back last update" | Not the driver, not the Maestro version |
+| Dropping resolution / frames changes nothing | The encoder output is wrong regardless of size |
+| The "AMD driver timeout" popup | **Secondary.** RAM starvation dragged the already-doomed decode out to 8–9 min, long enough to trip Windows' GPU watchdog. Annoying, not causal. |
+
+**First move when H3 output goes flat grey: switch H3 Text Encoder to
+GGUF Q4_K_M** (Advanced Settings). If it was already on Q4_K_M, then check
+for a genuinely corrupt file — compare `stat` mtimes under
+`Maestro/app/ckpts/minimax_h3/` against when it broke — and run **Repair**.
+
+**Contributing factors that are real but were NOT the root cause:**
+
+- **RAM starvation.** 32 GB is marginal for H3 at length — mmgp logs
+  *"full requirements 19,987 MB while estimated available reservable RAM
+  is 13,021 MB"* and runs permanently in partial-pinning mode. Seen at
+  **0.4–0.9 GB free**. It makes every decode slower and is what lets the
+  TDR watchdog fire, but good runs happened under the same pressure on the
+  intact encoder file. Mitigate with a reboot before big jobs, `LLM
+  Device: CPU`, fewer other apps, smaller generations.
+- **Windows TDR watchdog.** Raising it hides the popup and lets a slow
+  decode finish, but does not fix a corrupt-file grey-out. `TdrDelay` /
+  `TdrDdiDelay` DWORDs under
+  `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers` (needs admin +
+  reboot; `TdrDelay=60` alone is not enough — `TdrDdiDelay` defaults to
+  5 s). The dialog's *"Don't ask me again"* checkbox only suppresses the
+  prompt; the GPU still resets.
+
+**The Settings → System → "VAE Tiling" dropdown (`vae_config`) does
+nothing for H3.** It only reaches VAEs implementing `get_VAE_tile_size`
+(Wan, LTX, Hunyuan, Qwen, Flux); `wgp.py:7962`'s `hasattr` check is False
+for `models/minimax_h3/video_vae.py`'s `AutoencoderKLMiniMaxH3`, so
+`VAE_tile_size` stays `None` and `minimax_h3_main.py`'s `generate()` drops
+the arg into `**_kwargs`. The H3 video VAE tiles itself, hard-on at a
+fixed 256 px (`video_vae.py:663`). Do not tell a user to set "Aggressive
+Tiling (Low VRAM)" for an H3 grey-out.
+
+**Related but distinct failures seen in the same debugging session** (all
+on `minimax_h3_ref2va`, 2nd+ generation in a long-lived server on a 32 GB
+box — points at mmgp offload state not resetting cleanly between jobs):
+`split_with_sizes ... sum to 64 ... got [4,4,4,4]` in
+`models/ideogram4/qwen3_vl_transformers.py:947` (an upstream pre/post
+spatial-merge grid bug — pure shape logic, no HIP in the trace, report
+upstream), and a bogus `HIP OOM 9980 GiB` in the Q2_K embedding. Restart
+the server between big H3 jobs.
+
+
 ## Do not
 
 - Do not vendor upstream Maestro source files into this repo (that was
