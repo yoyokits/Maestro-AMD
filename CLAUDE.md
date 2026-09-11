@@ -785,6 +785,46 @@ spatial-merge grid bug — pure shape logic, no HIP in the trace, report
 upstream), and a bogus `HIP OOM 9980 GiB` in the Q2_K embedding. Restart
 the server between big H3 jobs.
 
+### 11. ace_step crash: `ImportError: cannot import name 'group' from 'torch.distributed'`
+
+**Symptom:** loading the ace_step TTS/music pipeline crashes at import
+time with `ImportError: cannot import name 'group' from
+'torch.distributed'`, coming out of `vector_quantize_pytorch`.
+
+**Root cause — same family as issue #1, a call site the original FSDP
+shadow didn't cover.** `vector_quantize_pytorch`'s
+`lookup_free_quantization.py` (pulled in by ace_step) does
+`from torch.distributed import nn as dist_nn` at module scope. That runs
+the real `torch/distributed/nn/__init__.py`, which does
+`from .functional import *`; `functional.py` does
+`from torch.distributed import group, ReduceOp` at module scope. `group`
+is only ever assigned inside `torch/distributed/__init__.py`'s
+`if is_available():` block, and `is_available()` is `False` on this
+ROCm-for-Windows nightly (no RCCL/GLOO) — so the import dies. The only
+thing `dist_nn` is used for at that call site (`dist_nn.all_reduce`) is
+itself guarded by a world-size>1 check, so it's dead code on Maestro's
+single-GPU path — same shape as `shard_model()` in issue #1.
+
+**Fix — `maestro_amd_preamble.py`, mirrors the FSDP shadow exactly.**
+Pre-seeds `sys.modules["torch.distributed.nn"]` (+ `.functional`) with a
+fake module before the real one can load, using the same
+raises-if-actually-called placeholder shape as the FSDP stub. Never
+imports `torch` itself, so it carries none of the issue #2 subprocess-storm
+risk. `diagnose.py` grew a matching check next to `check_fsdp_shadow`.
+
+**Verified end-to-end** on an RX 7900 XTX / Windows install running the
+exact reported PyTorch build (`2.10.0a0+rocm7.10.0a20251120`):
+reproduced the ImportError on the pre-fix venv; read the installed
+`vector_quantize_pytorch` and `torch/distributed` source to confirm the
+chain above; deployed the fix via `install_preamble.py` (the real
+`install.js`/`update.js` entry point); post-fix, in a fresh interpreter,
+`torch.distributed.nn`/`.functional` are shadowed automatically at
+startup, `import vector_quantize_pytorch` (what ace_step does) succeeds,
+the stub's `all_reduce` raises a clean `RuntimeError` if ever called
+rather than crashing the interpreter, the existing FSDP shadow is
+unaffected, and `diagnose.py` reports `[ok] torch.distributed.nn shadowed
+by the wrapper preamble`.
+
 
 ## Do not
 
