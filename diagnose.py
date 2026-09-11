@@ -18,6 +18,7 @@ Both are documented crash/hang sources on this ROCm-for-Windows stack
 (CLAUDE.md "Known runtime issues" #2):
 
   * `import torch.distributed.fsdp` (or anything under it)
+  * `import torch.distributed.nn` (or anything under it)
   * `torch.distributed.is_available()`
 
 Importing torch itself is fine here -- launch.py does it too. What is not
@@ -208,6 +209,21 @@ def check_fsdp_shadow():
         ok("torch.distributed.fsdp shadowed by the wrapper preamble")
     else:
         info("torch.distributed.fsdp already present (not our stub) -- "
+             "this build may have a working distributed backend")
+
+    dist_nn = sys.modules.get("torch.distributed.nn")
+    if dist_nn is None:
+        warn(
+            "torch.distributed.nn is not shadowed at startup",
+            "Expected the wrapper preamble to pre-populate it. If Maestro "
+            "crashes with ImportError: cannot import name 'group' from "
+            "'torch.distributed' (seen loading ace_step / "
+            "vector_quantize_pytorch), run Update to reinstall the preamble.",
+        )
+    elif getattr(dist_nn, "__maestro_amd_stub__", False):
+        ok("torch.distributed.nn shadowed by the wrapper preamble")
+    else:
+        info("torch.distributed.nn already present (not our stub) -- "
              "this build may have a working distributed backend")
 
     purelib = Path(sysconfig.get_paths()["purelib"])

@@ -18,6 +18,18 @@ real module ever loads means Python's `from torch.distributed.fsdp import
 ...` finds our fake in the cache and skips running the real
 fsdp/__init__.py entirely — the crashing import chain never executes.
 
+Same failure family, different call site: `vector_quantize_pytorch`'s
+`lookup_free_quantization.py` (pulled in by the ace_step TTS pipeline) does
+`from torch.distributed import nn as dist_nn` at module scope. That triggers
+PyTorch's real `torch/distributed/nn/__init__.py`, which itself does
+`from torch.distributed import group` — undefined when
+`torch.distributed.is_available()` is False, so the import dies with
+`ImportError: cannot import name 'group' from 'torch.distributed'`. The one
+thing `dist_nn` is used for (`dist_nn.all_reduce(...)` in
+`lookup_free_quantization.py`) is itself guarded by a world-size-greater-
+than-1 check, so it's dead code on single-GPU inference — same shape as
+`shard_model()`. Shadowed below the same way.
+
 **Why a .pth file and not sitecustomize.py**
 
 This was originally shipped as `sitecustomize.py`. That works, but
@@ -101,8 +113,48 @@ def _install_fsdp_shadow():
     sys.modules["torch.distributed.fsdp.wrap"] = wrap
 
 
+def _install_distributed_nn_shadow():
+    if "torch.distributed.nn" in sys.modules:
+        return
+
+    dist_nn = types.ModuleType("torch.distributed.nn")
+    dist_nn.__path__ = []
+    dist_nn.__maestro_amd_stub__ = True
+    functional = types.ModuleType("torch.distributed.nn.functional")
+    functional.__maestro_amd_stub__ = True
+
+    class _Unavailable:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "torch.distributed.nn is stubbed on this build — no working "
+                "backend. (Maestro AMD wrapper preamble.)"
+            )
+
+    for name in (
+        "all_reduce",
+        "all_gather",
+        "all_to_all",
+        "broadcast",
+        "gather",
+        "scatter",
+        "reduce_scatter",
+    ):
+        setattr(dist_nn, name, _Unavailable)
+        setattr(functional, name, _Unavailable)
+
+    dist_nn.functional = functional
+    sys.modules["torch.distributed.nn"] = dist_nn
+    sys.modules["torch.distributed.nn.functional"] = functional
+
+
 try:
     _install_fsdp_shadow()
+except Exception:
+    # A startup hook must never be able to break the interpreter.
+    pass
+
+try:
+    _install_distributed_nn_shadow()
 except Exception:
     # A startup hook must never be able to break the interpreter.
     pass
