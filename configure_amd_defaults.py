@@ -36,10 +36,26 @@ so -- on any AMD GPU:
 **How the H3 fix is applied -- no upstream files are touched.** wgp.py
 discovers model definitions from `defaults/*.json` **and**
 `finetunes/*.json`, sorted, so a `finetunes/` file with the same basename
-merges over the `defaults/` one (`existing_model_def.update(model_def)`).
-`app/finetunes/*.json` is git-ignored upstream, so the override survives
-`git reset --hard` in update.js. That folder is the documented extension
-point -- upstream ships a "put your finetunes here.txt" in it.
+is processed after the `defaults/` one. `app/finetunes/*.json` is
+git-ignored upstream, so the override survives `git reset --hard` in
+update.js. That folder is the documented extension point -- upstream ships
+a "put your finetunes here.txt" in it.
+
+**The override must be a FULL copy of the defaults file, never a delta.**
+Up to Maestro v2.1.6 a same-named finetune was merged over the default
+(`existing_model_def.update(model_def)`), so a two-key override worked.
+From v2.2.0 `load_model_definitions()` registers the raw finetune dict,
+runs `init_model_def()` on it (which reads `model_def["architecture"]`),
+then *replaces* the default (`existing_model_def.clear(); .update(...)`).
+A partial file therefore crashes startup with `KeyError: 'architecture'`,
+and a partial file that merely adds `architecture` would silently drop the
+variant's name, URLs and default settings. See CLAUDE.md "Known runtime
+issues" #12. The copy is rebuilt from the current defaults file on every
+run, so it tracks upstream changes to those defaults.
+
+The ownership marker lives inside `"model"`: under the v2.2.0 loader every
+top-level key becomes a UI setting and would leak into
+`settings/<model>_settings.json`.
 
 Setting `minimax_h3_text_encoder_default` also redirects the *download*:
 wgp.py resolves the encoder's URLs from the selected variant
@@ -127,6 +143,19 @@ def h3_model_types():
     )
 
 
+def _is_managed(data):
+    """True if this wrapper wrote the file.
+
+    Current files carry the marker inside "model"; files written before
+    Maestro v2.2.0 support carry it at top level and must still count, so
+    they get rewritten instead of being mistaken for user files.
+    """
+    if not isinstance(data, dict):
+        return False
+    model = data.get("model")
+    return bool(data.get(MARKER)) or (isinstance(model, dict) and bool(model.get(MARKER)))
+
+
 def apply_h3_default():
     """Override the H3 text-encoder default via finetunes/."""
     types = h3_model_types()
@@ -138,21 +167,48 @@ def apply_h3_default():
         target = FINETUNES_DIR / f"{model_type}.json"
         existing = _read_json(target)
 
-        if existing is not None and not existing.get(MARKER):
+        if target.exists() and not _is_managed(existing):
             # Someone else's finetune for this model type. Never clobber.
             _notes.append(f"{target.name}: user-authored, left alone")
             continue
 
-        desired = {
-            MARKER: True,
-            "model": {H3_DEFAULT_KEY: H3_SAFE_ENCODER},
-        }
+        desired = _read_json(DEFAULTS_DIR / f"{model_type}.json")
+        model = desired.get("model") if isinstance(desired, dict) else None
+        if not isinstance(model, dict) or not model.get("architecture"):
+            # Never write a copy that upstream's loader would crash on.
+            _notes.append(
+                f"defaults/{model_type}.json has no model.architecture -- skipped"
+            )
+            continue
+        model[H3_DEFAULT_KEY] = H3_SAFE_ENCODER
+        model[MARKER] = True
+
         if existing == desired:
             continue
         if _write_json(target, desired):
             _changes.append(
                 f"{model_type}: H3 text-encoder default -> {H3_SAFE_ENCODER}"
             )
+
+
+def remove_orphaned_h3_overrides():
+    """Delete managed H3 overrides whose upstream default no longer exists.
+
+    A full copy outlives its source, so without this a variant removed
+    upstream would keep appearing in the UI with stale URLs.
+    """
+    if not FINETUNES_DIR.is_dir():
+        return
+    for path in sorted(FINETUNES_DIR.glob("minimax_h3*.json")):
+        if (DEFAULTS_DIR / path.name).is_file():
+            continue
+        if not _is_managed(_read_json(path)):
+            continue
+        try:
+            path.unlink()
+            _changes.append(f"{path.name}: removed (no longer defined upstream)")
+        except OSError as exc:
+            _log(f"could not remove {path}: {exc}")
 
 
 def heal_h3_settings():
@@ -203,6 +259,7 @@ def main():
         _log(f"no Maestro install at {APP} -- skipping")
         return 0
 
+    remove_orphaned_h3_overrides()
     apply_h3_default()
     heal_h3_settings()
     heal_attention_mode()

@@ -825,6 +825,57 @@ rather than crashing the interpreter, the existing FSDP shadow is
 unaffected, and `diagnose.py` reports `[ok] torch.distributed.nn shadowed
 by the wrapper preamble`.
 
+### 12. Crash on every Start after Maestro v2.2.0: `KeyError: 'architecture'`
+
+**Symptom:** `launch.py` dies importing `wgp.py`, before any UI or GPU code:
+```
+File ".../wgp.py", line 3483, in <module>
+    load_model_definitions()
+File ".../wgp.py", line 3452, in load_model_definitions
+    model_def = init_model_def(model_type, model_def)
+File ".../wgp.py", line 3414, in init_model_def
+    base_model_type = get_base_model_type(model_type)
+File ".../wgp.py", line 2877, in get_base_model_type
+    return model_def["architecture"]
+KeyError: 'architecture'
+```
+(Reported on Ubuntu / Radeon AI Pro 9700. The "RTX 50 / CUDA 13 ACTION
+REQUIRED" lines printed just before it are upstream noise, unrelated.)
+
+**Root cause — our own override file, broken by an upstream loader
+change.** `configure_amd_defaults.py` used to write a two-key delta per H3
+model to `finetunes/minimax_h3*.json`
+(`{"_maestro_amd_managed": true, "model": {"minimax_h3_text_encoder_default": "gguf_q4_k_m"}}`).
+
+- Up to **v2.1.6**, `load_model_definitions()` merged a same-named
+  finetune over its default (`existing_model_def.update(model_def)`) and
+  never re-ran `init_model_def`. The delta worked.
+- From **v2.2.0** (upstream fix for Blizaine/Maestro#126, stale keys on
+  live reload) it does `models_def[model_type] = <raw finetune dict>`, then
+  `init_model_def()` → `get_base_model_type()` reads that raw dict → no
+  `architecture` → crash. After init it **replaces** the default
+  (`existing_model_def.clear(); existing_model_def.update(model_def)`), and
+  the file's top-level keys become the model's UI `settings`.
+
+**Why "just add `architecture`" is wrong.** It stops the crash, but under
+replace semantics every H3 variant would lose its `name`, `URLs`
+(checkpoint downloads), variant keys such as `minimax_h3_qkv_layout` and
+all default settings. And `architecture` differs per variant
+(`minimax_h3`, `minimax_h3_full`, `minimax_h3_voice_audio`, ...), so it
+cannot be hardcoded.
+
+**Fix — `configure_amd_defaults.py` writes a full copy** of the matching
+`defaults/` file with only the encoder default changed, rebuilt from the
+current default on every Start/Update (so it tracks upstream edits). The
+ownership marker moved inside `"model"` — at top level it would now leak
+into `settings/<model>_settings.json`; top-level markers are still
+recognised so old files get rewritten. Managed copies whose default was
+removed upstream are deleted. **Self-healing:** `start.js` runs the script
+right before `launch.py`, so an affected user only needs the wrapper
+update and one Start. `diagnose.py` fails on any `finetunes/*.json`
+lacking `model.architecture`, including user-authored ones (which the
+wrapper never edits).
+
 
 ## Do not
 
@@ -832,6 +883,10 @@ by the wrapper preamble`.
   the abandoned approach — remnants in `temp/`, safe to delete when
   convenient).
 - Do not add NVIDIA / CUDA / Sol / RTX branches. Sibling project.
+- Do not write partial (delta) model definitions to `finetunes/`. Since
+  Maestro v2.2.0 a same-named finetune replaces its default outright —
+  always write a full copy of the matching `defaults/` file. See "Known
+  runtime issues" #12.
 - Do not use `--depth 1` for the Maestro clone — the extra weight is
   negligible and it keeps `git pull` trivially correct across upstream
   branch rewrites.

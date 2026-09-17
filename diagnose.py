@@ -245,9 +245,49 @@ def check_amd_defaults():
     section("AMD setting overrides  (CLAUDE.md #6)")
     import json
 
-    # MiniMax H3 text encoder: NVFP4 AWQ hangs the whole OS on AMD.
     defaults_dir = APP / "defaults"
     finetunes = APP / "finetunes"
+
+    def managed(d):
+        # Marker lives in "model" now; top level in pre-v2.2.0 files.
+        model = d.get("model") if isinstance(d, dict) else None
+        return isinstance(d, dict) and (
+            bool(d.get("_maestro_amd_managed"))
+            or (isinstance(model, dict) and bool(model.get("_maestro_amd_managed")))
+        )
+
+    # Maestro v2.2.0+ reads model.architecture from every finetune before
+    # merging it with its default, so one bad file stops the app at import
+    # with KeyError: 'architecture' (CLAUDE.md #12).
+    for f in sorted(finetunes.glob("*.json")) if finetunes.is_dir() else []:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(
+                f"finetunes/{f.name} is not valid JSON ({exc})",
+                "Maestro refuses to start on this. Fix the file or move it out "
+                "of Maestro/app/finetunes/.",
+            )
+            continue
+        model = d.get("model") if isinstance(d, dict) else None
+        if isinstance(model, dict) and model.get("architecture"):
+            continue
+        if managed(d):
+            fail(
+                f"finetunes/{f.name} has no model.architecture -- Maestro will "
+                "crash at startup with KeyError: 'architecture'",
+                "Written by an older wrapper version. Start or Update rewrites it.",
+            )
+        else:
+            fail(
+                f"finetunes/{f.name} has no model.architecture -- Maestro will "
+                "crash at startup with KeyError: 'architecture'",
+                "This is your own file. Make it a full definition (copy the "
+                "matching Maestro/app/defaults/ file and edit that), or move it "
+                "out of Maestro/app/finetunes/.",
+            )
+
+    # MiniMax H3 text encoder: NVFP4 AWQ hangs the whole OS on AMD.
     h3_types = sorted(p.stem for p in defaults_dir.glob("minimax_h3*.json"))         if defaults_dir.is_dir() else []
     if not h3_types:
         info("no MiniMax H3 models installed")
@@ -267,7 +307,7 @@ def check_amd_defaults():
                 continue
             # A finetune the user wrote themselves is never overwritten by
             # the wrapper, so telling them to run Update would be wrong.
-            if d is not None and not d.get("_maestro_amd_managed"):
+            if d is not None and not managed(d):
                 user_owned.append(mt)
             else:
                 missing.append(mt)
