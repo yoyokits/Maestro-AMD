@@ -245,9 +245,41 @@ def check_amd_defaults():
     section("AMD setting overrides  (CLAUDE.md #6)")
     import json
 
-    # MiniMax H3 text encoder: NVFP4 AWQ hangs the whole OS on AMD.
     defaults_dir = APP / "defaults"
     finetunes = APP / "finetunes"
+
+    # Same predicates Start uses, so this report cannot drift from what the
+    # wrapper actually does. Plain JSON helpers -- no torch, no side effects.
+    import configure_amd_defaults as cad
+    managed = cad._is_managed
+
+    # Maestro's loader raises on any finetune that is unparseable or lacks
+    # model.architecture (KeyError: 'architecture'), whoever wrote it.
+    # CLAUDE.md #12.
+    traits = cad.loader_traits()
+    for f in sorted(finetunes.glob("*.json")) if finetunes.is_dir() else []:
+        status, d = cad._load_json(f)
+        reason = cad._fatal(status, d)
+        if reason is None:
+            continue
+        if status == cad.OK and managed(d):
+            hint = "Written by an older wrapper version. Start or Update replaces it."
+        elif status == cad.OK and cad._loader_accepts(f, d, traits):
+            continue
+        else:
+            hint = ("Start moves it aside to finetunes/" + f.name + ".disabled so "
+                    "Maestro can launch. To keep it, make it a full definition "
+                    "(copy the matching Maestro/app/defaults/ file and edit that).")
+        fail(f"finetunes/{f.name}: {reason} -- Maestro will not start with it", hint)
+
+    for f in sorted(finetunes.glob("*.json.disabled*")) if finetunes.is_dir() else []:
+        original = f.name.split(".disabled")[0]
+        warn(
+            f"finetunes/{f.name} was moved aside because Maestro could not load it",
+            f"Fix it and rename it back to {original}, or delete it if unwanted.",
+        )
+
+    # MiniMax H3 text encoder: NVFP4 AWQ hangs the whole OS on AMD.
     h3_types = sorted(p.stem for p in defaults_dir.glob("minimax_h3*.json"))         if defaults_dir.is_dir() else []
     if not h3_types:
         info("no MiniMax H3 models installed")
@@ -267,7 +299,7 @@ def check_amd_defaults():
                 continue
             # A finetune the user wrote themselves is never overwritten by
             # the wrapper, so telling them to run Update would be wrong.
-            if d is not None and not d.get("_maestro_amd_managed"):
+            if d is not None and not managed(d):
                 user_owned.append(mt)
             else:
                 missing.append(mt)

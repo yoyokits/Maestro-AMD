@@ -36,10 +36,34 @@ so -- on any AMD GPU:
 **How the H3 fix is applied -- no upstream files are touched.** wgp.py
 discovers model definitions from `defaults/*.json` **and**
 `finetunes/*.json`, sorted, so a `finetunes/` file with the same basename
-merges over the `defaults/` one (`existing_model_def.update(model_def)`).
-`app/finetunes/*.json` is git-ignored upstream, so the override survives
-`git reset --hard` in update.js. That folder is the documented extension
-point -- upstream ships a "put your finetunes here.txt" in it.
+is processed after the `defaults/` one. `app/finetunes/*.json` is
+git-ignored upstream, so the override survives `git reset --hard` in
+update.js. That folder is the documented extension point -- upstream ships
+a "put your finetunes here.txt" in it.
+
+**The override must be a FULL copy of the defaults file, never a delta.**
+Up to Maestro v2.1.6 a same-named finetune was merged over the default
+(`existing_model_def.update(model_def)`), so a two-key override worked.
+From v2.2.0 `load_model_definitions()` registers the raw finetune dict,
+runs `init_model_def()` on it (which reads `model_def["architecture"]`),
+then *replaces* the default (`existing_model_def.clear(); .update(...)`).
+A partial file therefore crashes startup with `KeyError: 'architecture'`,
+and a partial file that merely adds `architecture` would silently drop the
+variant's name, URLs and default settings. See CLAUDE.md "Known runtime
+issues" #12. The copy is rebuilt from the current defaults file on every
+run, so it tracks upstream changes to those defaults.
+
+The ownership marker lives inside `"model"`: under the v2.2.0 loader every
+top-level key becomes a UI setting and would leak into
+`settings/<model>_settings.json`.
+
+**Never leave a file behind that stops Maestro from starting.** Upstream's
+loader raises on *any* `finetunes/*.json` that is unparseable or lacks
+`model.architecture`, whoever wrote it. So before anything else every such
+file is removed (ours) or renamed to `<name>.json.disabled` (anyone else's,
+never deleted); writes are atomic; and if a default ever stops looking
+like one we understand, our copy is removed and upstream's stock default
+wins. Each pass is isolated, and the script always exits 0.
 
 Setting `minimax_h3_text_encoder_default` also redirects the *download*:
 wgp.py resolves the encoder's URLs from the selected variant
@@ -49,7 +73,9 @@ Q4_K_M file instead of the ~15.7 GB NVFP4 one.
 Idempotent and conservative. Run it as often as you like.
 """
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -94,24 +120,49 @@ def _log(msg):
     print(f"[amd_defaults] {msg}")
 
 
-def _read_json(path):
+MISSING, INVALID, OK = "missing", "invalid", "ok"
+
+
+def _load_json(path):
+    """(status, data) -- keeps "unreadable" distinct from "absent"."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return OK, json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
-    except (OSError, json.JSONDecodeError) as exc:
-        _log(f"could not read {path.name}: {exc}")
-        return None
+        return MISSING, None
+    except (OSError, ValueError) as exc:
+        return INVALID, exc
+
+
+def _read_json(path):
+    status, data = _load_json(path)
+    return data if status == OK else None
 
 
 def _write_json(path, data):
+    # The tmp name must not end in .json, or upstream's loader would glob it.
+    tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        os.replace(tmp, path)
         return True
     except OSError as exc:
         _log(f"could not write {path}: {exc}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         return False
+
+
+def _remove(path, why):
+    try:
+        path.unlink()
+        _changes.append(f"{path.name}: removed ({why})")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log(f"could not remove {path}: {exc}")
 
 
 def h3_model_types():
@@ -127,6 +178,123 @@ def h3_model_types():
     )
 
 
+def _is_managed(data):
+    """True if this wrapper wrote the file.
+
+    Current files carry the marker inside "model"; files written before
+    Maestro v2.2.0 support carry it at top level and must still count, so
+    they get rewritten instead of being mistaken for user files.
+    """
+    if not isinstance(data, dict):
+        return False
+    model = data.get("model")
+    return bool(data.get(MARKER)) or (isinstance(model, dict) and bool(model.get(MARKER)))
+
+
+def definition_problem(data):
+    """Why upstream's loader would crash on this parsed definition, or None.
+
+    Mirrors what `load_model_definitions()` dereferences unconditionally:
+    `json_def["model"]` and then `model_def["architecture"]`.
+    """
+    if not isinstance(data, dict):
+        return "not a JSON object"
+    model = data.get("model")
+    if not isinstance(model, dict):
+        return "no \"model\" block"
+    if not model.get("architecture"):
+        return "no model.architecture"
+    return None
+
+
+def _fatal(status, data):
+    if status == MISSING:
+        return None
+    if status == INVALID:
+        return f"unreadable JSON ({data})"
+    return definition_problem(data)
+
+
+def fatal_reason(path):
+    """Why Maestro would refuse to start on this finetunes file, or None."""
+    return _fatal(*_load_json(path))
+
+
+def loader_traits():
+    """(strict, replaces) for the installed wgp.py's definition loader.
+
+    strict: it indexes json_def["model"] / model_def["architecture"]
+    directly, so their absence is a crash. replaces: a same-named finetune
+    replaces its default (v2.2.0+) instead of merging over it (<= v2.1.x),
+    so a partial override is a crash too. Read from the source so a user
+    file is only ever renamed when the installed loader really rejects it.
+    """
+    try:
+        source = (APP / "wgp.py").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False, False
+    strict = 'json_def["model"]' in source and 'model_def["architecture"]' in source
+    return strict, "existing_model_def.clear()" in source
+
+
+def _loader_accepts(path, data, traits):
+    """Whether a parseable file flagged by definition_problem still loads."""
+    strict, replaces = traits
+    if not strict:
+        return True
+    partial_override = (
+        isinstance(data, dict)
+        and isinstance(data.get("model"), dict)
+        and (DEFAULTS_DIR / path.name).is_file()
+    )
+    return partial_override and not replaces
+
+
+def _quarantine_name(path):
+    target = path.with_name(path.name + ".disabled")
+    if target.exists():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = path.with_name(f"{path.name}.disabled-{stamp}")
+    return target
+
+
+def quarantine_fatal_finetunes():
+    """Move every finetune that would crash Maestro at startup out of the way.
+
+    Ours are deleted (apply_h3_default rebuilds them). Anything we can't
+    prove we wrote -- including unparseable files -- is renamed, never
+    deleted, so a user's work survives.
+    """
+    if not FINETUNES_DIR.is_dir():
+        return
+    traits = None
+    for path in sorted(FINETUNES_DIR.glob("*.json")):
+        status, data = _load_json(path)
+        reason = _fatal(status, data)
+        if reason is None:
+            continue
+        if status == OK and _is_managed(data):
+            _remove(path, f"outdated wrapper override, {reason}")
+            continue
+        if status == OK:
+            traits = traits or loader_traits()
+            if _loader_accepts(path, data, traits):
+                _notes.append(f"{path.name}: {reason}, but this Maestro's loader "
+                              "accepts it -- left alone")
+                continue
+        target = _quarantine_name(path)
+        try:
+            os.replace(path, target)
+        except OSError as exc:
+            _log(f"could not move aside {path}: {exc}")
+            continue
+        _changes.append(
+            f"{path.name}: {reason} -- Maestro would crash at startup on it. "
+            f"Renamed to {target.name}; fix it and rename it back to "
+            f"{path.name}."
+        )
+
+
 def apply_h3_default():
     """Override the H3 text-encoder default via finetunes/."""
     types = h3_model_types()
@@ -136,23 +304,48 @@ def apply_h3_default():
 
     for model_type in types:
         target = FINETUNES_DIR / f"{model_type}.json"
-        existing = _read_json(target)
+        status, existing = _load_json(target)
 
-        if existing is not None and not existing.get(MARKER):
-            # Someone else's finetune for this model type. Never clobber.
+        if status != MISSING and not (status == OK and _is_managed(existing)):
+            # Someone else's valid finetune (fatal ones were already moved).
             _notes.append(f"{target.name}: user-authored, left alone")
             continue
 
-        desired = {
-            MARKER: True,
-            "model": {H3_DEFAULT_KEY: H3_SAFE_ENCODER},
-        }
+        desired = _read_json(DEFAULTS_DIR / f"{model_type}.json")
+        problem = definition_problem(desired)
+        if problem:
+            # A default we don't understand: drop our copy and let upstream's
+            # own default load, rather than risk a stale or broken override.
+            _notes.append(f"defaults/{model_type}.json: {problem} -- not overridden")
+            if status == OK:
+                _remove(target, "its upstream default changed shape")
+            continue
+        model = desired["model"]
+        model[H3_DEFAULT_KEY] = H3_SAFE_ENCODER
+        model[MARKER] = True
+
         if existing == desired:
             continue
         if _write_json(target, desired):
             _changes.append(
                 f"{model_type}: H3 text-encoder default -> {H3_SAFE_ENCODER}"
             )
+
+
+def remove_orphaned_h3_overrides():
+    """Delete managed H3 overrides whose upstream default no longer exists.
+
+    A full copy outlives its source, so without this a variant removed
+    upstream would keep appearing in the UI with stale URLs.
+    """
+    if not FINETUNES_DIR.is_dir():
+        return
+    for path in sorted(FINETUNES_DIR.glob("minimax_h3*.json")):
+        if (DEFAULTS_DIR / path.name).is_file():
+            continue
+        if not _is_managed(_read_json(path)):
+            continue
+        _remove(path, "no longer defined upstream")
 
 
 def heal_h3_settings():
@@ -203,9 +396,19 @@ def main():
         _log(f"no Maestro install at {APP} -- skipping")
         return 0
 
-    apply_h3_default()
-    heal_h3_settings()
-    heal_attention_mode()
+    # Isolated so one unexpected failure can't skip the passes after it --
+    # and this helper must never be the thing that blocks Start.
+    for step in (
+        quarantine_fatal_finetunes,
+        remove_orphaned_h3_overrides,
+        apply_h3_default,
+        heal_h3_settings,
+        heal_attention_mode,
+    ):
+        try:
+            step()
+        except Exception as exc:
+            _log(f"{step.__name__} failed: {exc!r}")
 
     for note in _notes:
         _log(note)

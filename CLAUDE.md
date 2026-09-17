@@ -42,6 +42,7 @@ Maestro-AMD/
 ├── update_state.py         ← rollback point + UI-rebuild bookkeeping
 ├── ensure_ffmpeg.py        ← provisions ffmpeg/ffprobe, see #3/#4
 ├── test_gpu_detection.js   ← unit tests for launcher_profile/torch.js detection logic
+├── test_amd_defaults.py    ← finetune-override tests + upstream loader contract, see #12
 ├── .maestro_state/         ← wrapper state (git-ignored, OUTSIDE Maestro/)
 ├── user_env.json           ← optional env overrides (git-ignored)
 ├── CLAUDE.md               ← this file
@@ -253,6 +254,18 @@ node --check test_gpu_detection.js
 Strix Halo failing-machine profile) and the `torch.js` step shapes for
 supported/unsupported/unknown targets on both platforms. Run it after
 touching either file: `node test_gpu_detection.js`.
+
+`test_amd_defaults.py` covers `configure_amd_defaults.py` (issue #12) and
+runs upstream's real finetune loader over its output. Stdlib only, no
+torch — any Python 3 works:
+
+```
+python test_amd_defaults.py --wgp Maestro/app/wgp.py [--app Maestro/app]
+```
+
+`--wgp` is repeatable (point it at older/newer upstream `wgp.py` files to
+check several loaders); `--app` seeds the contract with a real install's
+defaults and finetunes (read-only).
 
 For the async-export files (install/torch/start/update),
 `node --check` catches parse errors but not runtime issues in the
@@ -825,6 +838,92 @@ rather than crashing the interpreter, the existing FSDP shadow is
 unaffected, and `diagnose.py` reports `[ok] torch.distributed.nn shadowed
 by the wrapper preamble`.
 
+### 12. Crash on every Start after Maestro v2.2.0: `KeyError: 'architecture'`
+
+**Symptom:** `launch.py` dies importing `wgp.py`, before any UI or GPU code:
+```
+File ".../wgp.py", line 3483, in <module>
+    load_model_definitions()
+File ".../wgp.py", line 3452, in load_model_definitions
+    model_def = init_model_def(model_type, model_def)
+File ".../wgp.py", line 3414, in init_model_def
+    base_model_type = get_base_model_type(model_type)
+File ".../wgp.py", line 2877, in get_base_model_type
+    return model_def["architecture"]
+KeyError: 'architecture'
+```
+(Reported on Ubuntu / Radeon AI Pro 9700. The "RTX 50 / CUDA 13 ACTION
+REQUIRED" lines printed just before it are upstream noise, unrelated.)
+
+**Root cause — our own override file, broken by an upstream loader
+change.** `configure_amd_defaults.py` used to write a two-key delta per H3
+model to `finetunes/minimax_h3*.json`
+(`{"_maestro_amd_managed": true, "model": {"minimax_h3_text_encoder_default": "gguf_q4_k_m"}}`).
+
+- Up to **v2.1.6**, `load_model_definitions()` merged a same-named
+  finetune over its default (`existing_model_def.update(model_def)`) and
+  never re-ran `init_model_def`. The delta worked.
+- From **v2.2.0** (upstream fix for Blizaine/Maestro#126, stale keys on
+  live reload) it does `models_def[model_type] = <raw finetune dict>`, then
+  `init_model_def()` → `get_base_model_type()` reads that raw dict → no
+  `architecture` → crash. After init it **replaces** the default
+  (`existing_model_def.clear(); existing_model_def.update(model_def)`), and
+  the file's top-level keys become the model's UI `settings`.
+
+**Why "just add `architecture`" is wrong.** It stops the crash, but under
+replace semantics every H3 variant would lose its `name`, `URLs`
+(checkpoint downloads), variant keys such as `minimax_h3_qkv_layout` and
+all default settings. And `architecture` differs per variant
+(`minimax_h3`, `minimax_h3_full`, `minimax_h3_voice_audio`, ...), so it
+cannot be hardcoded.
+
+**Fix — `configure_amd_defaults.py` writes a full copy** of the matching
+`defaults/` file with only the encoder default changed, rebuilt from the
+current default on every Start/Update (so it tracks upstream edits). The
+ownership marker moved inside `"model"` — at top level it would now leak
+into `settings/<model>_settings.json`; top-level markers are still
+recognised so old files get rewritten. Managed copies whose default was
+removed upstream are deleted. **Self-healing:** `start.js` runs the script
+right before `launch.py`, so an affected user only needs the wrapper
+update and one Start. `diagnose.py` fails on any `finetunes/*.json`
+Maestro would refuse to load, using the script's own predicates.
+
+**Hardening — so the next upstream loader change can't take Start down.**
+The loader also `raise`s on an *unparseable* finetune, and on any file
+lacking `model`/`model.architecture`, whoever wrote it. The first
+shipped fix still had three ways back into a crash: a managed file
+corrupted mid-write was mistaken for a user file and skipped forever;
+a default that stopped carrying `architecture` left the old override in
+place; and a broken user finetune crashed Start like before. Now:
+
+- **Quarantine pass first.** Every `finetunes/*.json` the installed loader
+  would crash on is removed if it is ours (it gets rebuilt), otherwise
+  renamed to `<name>.json.disabled` — never deleted. Diagnose warns about
+  every `.disabled` file with the restore step.
+- **User files are only renamed when the installed `wgp.py` really rejects
+  them.** `loader_traits()` reads its source: *strict* (indexes
+  `json_def["model"]` / `model_def["architecture"]`) and *replaces*
+  (`existing_model_def.clear()`, v2.2.0+). On a merge loader (≤ v2.1.x) a
+  user's partial override of a same-named default loads fine, so it stays;
+  on a loader the check doesn't recognise, parseable user files are never
+  touched.
+- **Stock upstream is the fallback.** If a default is unreadable or has no
+  `model.architecture`, our copy is removed rather than kept stale.
+- **Atomic writes** (`<name>.json.tmp` + `os.replace`; the tmp suffix
+  avoids the loader's `*.json` glob). Each pass is isolated; exit is
+  always 0.
+
+**Verified** with `test_amd_defaults.py`, including its loader contract,
+which lifts upstream's real `load_model_definitions()` out of `wgp.py` by
+AST and runs it on the wrapper's output — against v2.1.5 (merge), v2.2.0
+and v2.2.2 (replace), seeded with a live install's nine old delta files:
+they raise `KeyError: 'architecture'` on 2.2.0/2.2.2 and load on 2.1.5;
+after one run of the script all nine H3 variants load on all three with
+name/URLs/architecture intact and the encoder on `gguf_q4_k_m`.
+**After an upstream update, run the contract test against the new
+`wgp.py` first** — if it fails or skips ("loader functions renamed"), the
+loader changed and this section needs revisiting.
+
 
 ## Do not
 
@@ -832,6 +931,11 @@ by the wrapper preamble`.
   the abandoned approach — remnants in `temp/`, safe to delete when
   convenient).
 - Do not add NVIDIA / CUDA / Sol / RTX branches. Sibling project.
+- Do not write partial (delta) model definitions to `finetunes/`. Since
+  Maestro v2.2.0 a same-named finetune replaces its default outright —
+  always write a full copy of the matching `defaults/` file. And never
+  delete a finetune the wrapper did not write — rename it aside. See
+  "Known runtime issues" #12.
 - Do not use `--depth 1` for the Maestro clone — the extra weight is
   negligible and it keeps `git pull` trivially correct across upstream
   branch rewrites.
