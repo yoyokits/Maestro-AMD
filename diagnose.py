@@ -248,44 +248,36 @@ def check_amd_defaults():
     defaults_dir = APP / "defaults"
     finetunes = APP / "finetunes"
 
-    def managed(d):
-        # Marker lives in "model" now; top level in pre-v2.2.0 files.
-        model = d.get("model") if isinstance(d, dict) else None
-        return isinstance(d, dict) and (
-            bool(d.get("_maestro_amd_managed"))
-            or (isinstance(model, dict) and bool(model.get("_maestro_amd_managed")))
-        )
+    # Same predicates Start uses, so this report cannot drift from what the
+    # wrapper actually does. Plain JSON helpers -- no torch, no side effects.
+    import configure_amd_defaults as cad
+    managed = cad._is_managed
 
-    # Maestro v2.2.0+ reads model.architecture from every finetune before
-    # merging it with its default, so one bad file stops the app at import
-    # with KeyError: 'architecture' (CLAUDE.md #12).
+    # Maestro's loader raises on any finetune that is unparseable or lacks
+    # model.architecture (KeyError: 'architecture'), whoever wrote it.
+    # CLAUDE.md #12.
+    traits = cad.loader_traits()
     for f in sorted(finetunes.glob("*.json")) if finetunes.is_dir() else []:
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-        except Exception as exc:
-            fail(
-                f"finetunes/{f.name} is not valid JSON ({exc})",
-                "Maestro refuses to start on this. Fix the file or move it out "
-                "of Maestro/app/finetunes/.",
-            )
+        status, d = cad._load_json(f)
+        reason = cad._fatal(status, d)
+        if reason is None:
             continue
-        model = d.get("model") if isinstance(d, dict) else None
-        if isinstance(model, dict) and model.get("architecture"):
+        if status == cad.OK and managed(d):
+            hint = "Written by an older wrapper version. Start or Update replaces it."
+        elif status == cad.OK and cad._loader_accepts(f, d, traits):
             continue
-        if managed(d):
-            fail(
-                f"finetunes/{f.name} has no model.architecture -- Maestro will "
-                "crash at startup with KeyError: 'architecture'",
-                "Written by an older wrapper version. Start or Update rewrites it.",
-            )
         else:
-            fail(
-                f"finetunes/{f.name} has no model.architecture -- Maestro will "
-                "crash at startup with KeyError: 'architecture'",
-                "This is your own file. Make it a full definition (copy the "
-                "matching Maestro/app/defaults/ file and edit that), or move it "
-                "out of Maestro/app/finetunes/.",
-            )
+            hint = ("Start moves it aside to finetunes/" + f.name + ".disabled so "
+                    "Maestro can launch. To keep it, make it a full definition "
+                    "(copy the matching Maestro/app/defaults/ file and edit that).")
+        fail(f"finetunes/{f.name}: {reason} -- Maestro will not start with it", hint)
+
+    for f in sorted(finetunes.glob("*.json.disabled*")) if finetunes.is_dir() else []:
+        original = f.name.split(".disabled")[0]
+        warn(
+            f"finetunes/{f.name} was moved aside because Maestro could not load it",
+            f"Fix it and rename it back to {original}, or delete it if unwanted.",
+        )
 
     # MiniMax H3 text encoder: NVFP4 AWQ hangs the whole OS on AMD.
     h3_types = sorted(p.stem for p in defaults_dir.glob("minimax_h3*.json"))         if defaults_dir.is_dir() else []
