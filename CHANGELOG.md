@@ -13,6 +13,30 @@ higher are only supported on Pinokio 2.0 or higher"*).
 The version of upstream Maestro you are running is independent of this —
 it is whatever `Maestro/` is checked out at. **Diagnose** prints both.
 
+## Unreleased
+
+### Fixed
+
+- **RDNA 2 cards other than the RX 6800/6900 crashed the server on Linux.**
+  PyTorch's `rocm7.2` wheels carry no kernels for gfx1031/gfx1032/gfx1034
+  (RX 6600/6650/6700/6750), so the GPU reported itself as available and
+  then segfaulted on the first real kernel launch — reported as a Director
+  song upload dying with "failed to fetch" and a greyed-out Start button,
+  because the segfault takes the whole backend down with it (issue #3,
+  brcisna). Start and Diagnose now set `HSA_OVERRIDE_GFX_VERSION=10.3.0`
+  for RDNA 2 on Linux. Windows was never affected.
+
+### Added
+
+- **Diagnose reports whether PyTorch actually ships kernels for your GPU**,
+  comparing the device's gfx target against `torch.cuda.get_arch_list()`.
+  This is the failure above, generalized — it will catch the next wheel
+  that drops a target rather than letting it segfault.
+- `MAESTRO_AMD_AUDIO_SEPARATOR_DEVICE=cpu` (via `user_env.json`) runs the
+  RoFormer vocal extractor on the CPU, for a GPU that cannot run that model
+  at all. Off by default: on a working GPU it is dramatically slower
+  (measured: 19 s vs. no progress in 11 minutes for a 60 s clip).
+
 ## v0.2.0
 
 Hardening release: GPU detection, venv correctness, diagnostics, and

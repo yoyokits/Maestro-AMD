@@ -26,6 +26,7 @@ fine is doing it from sitecustomize.py, which runs in *every* interpreter
 including the ones ROCm's own `offload-arch` console script spawns; that
 feedback loop is what produced the runaway subprocess storm.
 """
+import importlib.util
 import os
 import platform
 import shutil
@@ -240,6 +241,60 @@ def check_fsdp_shadow():
         )
 
 
+def check_audio_separator():
+    """The opt-in CPU hook for audio-separator (CLAUDE.md #13).
+
+    Reads sys.meta_path and the installed package's source text only --
+    importing audio_separator here would drag in torch and onnxruntime for
+    a report nobody asked to be slow.
+    """
+    section("Vocal separator device  (CLAUDE.md #13)")
+    env = "MAESTRO_AMD_AUDIO_SEPARATOR_DEVICE"
+    requested = os.environ.get(env, "").strip().lower()
+    hooked = any(
+        getattr(f, "__maestro_amd_hook__", None) == "audio_separator.separator"
+        for f in sys.meta_path
+    )
+    if requested == "cpu" and hooked:
+        ok("audio-separator forced onto CPU by the wrapper preamble")
+    elif requested == "cpu":
+        fail(
+            f"{env}=cpu is set but the preamble hook is not installed",
+            "Run Update to reinstall the preamble.",
+        )
+    else:
+        info(f"audio-separator runs on the GPU (default). Set {env}=cpu in "
+             "user_env.json if vocal extraction crashes the server.")
+
+    try:
+        spec = importlib.util.find_spec("audio_separator")
+        origin = getattr(spec, "origin", None)
+    except Exception:
+        origin = None
+    if not origin:
+        info("audio-separator not installed (only used by Director song uploads)")
+        return
+    source = Path(origin).parent / "separator" / "separator.py"
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        warn(f"could not read {source}: {exc}")
+        return
+    missing = [
+        needle for needle in ("class Separator", "self.torch_device", "onnx_execution_provider")
+        if needle not in text
+    ]
+    if missing:
+        warn(
+            f"audio-separator no longer looks like the version the CPU hook targets "
+            f"(missing: {', '.join(missing)})",
+            "The hook may silently do nothing. Run "
+            "test_audio_separator_cpu.py --python <venv python> and update the hook.",
+        )
+    else:
+        ok("installed audio-separator still matches the hook's seam")
+
+
 def check_amd_defaults():
     """NVIDIA-specific defaults that must be overridden on AMD."""
     section("AMD setting overrides  (CLAUDE.md #6)")
@@ -403,10 +458,44 @@ def check_torch():
         ok(f"GPU: {name}")
         info(f"gfx target    {gfx}")
         info(f"VRAM          {total:.1f} GiB")
+        check_arch_kernels(torch, gfx)
         return torch
     except Exception as exc:
         fail(f"could not query device 0: {exc}")
         return torch
+
+
+def check_arch_kernels(torch, gfx):
+    """Does this torch actually carry kernels for this GPU? (CLAUDE.md #13)
+
+    A wheel built without your gfx target still reports the GPU as
+    available and then dies inside the first real kernel launch -- as a
+    segfault, with no Python traceback to read. That is what happened on
+    an RX 6600 (gfx1032) on Linux, where PyTorch's rocm7.2 wheels ship
+    gfx1030 but not gfx1031/1032/1034 (issue #3).
+    """
+    try:
+        arch_list = [a.split(":")[0] for a in torch.cuda.get_arch_list()]
+    except Exception as exc:
+        info(f"could not read torch.cuda.get_arch_list(): {exc}")
+        return
+    if not arch_list:
+        return
+    override = os.environ.get("HSA_OVERRIDE_GFX_VERSION")
+    if gfx in arch_list:
+        ok(f"torch ships kernels for {gfx}")
+    elif override:
+        ok(f"{gfx} has no kernels in this torch, but HSA_OVERRIDE_GFX_VERSION={override} "
+           "is presenting it as a supported target")
+    else:
+        fail(
+            f"this torch has no kernels for {gfx} (built for: {', '.join(arch_list)})",
+            "The GPU will crash the server on the first real kernel launch, "
+            "usually as a segfault with no traceback. Start sets "
+            "HSA_OVERRIDE_GFX_VERSION for RDNA 2 on Linux automatically -- run "
+            "Update to get that fix. For any other target, set the matching "
+            "version in user_env.json (e.g. gfx1032 -> \"10.3.0\").",
+        )
 
 
 def check_attention(torch):
@@ -519,6 +608,7 @@ def main():
     check_env()
     check_ffmpeg()
     check_fsdp_shadow()
+    check_audio_separator()
     check_amd_defaults()
     torch = check_torch()
     check_attention(torch)

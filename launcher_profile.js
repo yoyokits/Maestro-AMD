@@ -72,6 +72,27 @@ const resolveGpuTarget = (kernel = {}) => {
 const isAmdRdna2 = (kernel = {}) =>
   isAmd(kernel) && /^gfx103[0124]$/.test(resolveGpuTarget(kernel) || "")
 
+// Linux-only: PyTorch's rocm7.2 wheels (torch.js's Linux index) are built
+// for gfx1030 but NOT gfx1031/gfx1032/gfx1034 — verified in pytorch
+// v2.11.0's .ci/docker/manywheel/build.sh PYTORCH_ROCM_ARCH, and the same
+// list prunes the bundled rocBLAS/hipBLASLt kernel libraries. So an
+// RX 6600/6650/6700/6750 (gfx1032/gfx1031) has no kernels: torch reports
+// the GPU as available and then dies inside the first real kernel launch
+// (reported as `Segmentation fault (core dumped)` mid-inference — issue
+// #3). HSA_OVERRIDE_GFX_VERSION=10.3.0 makes ROCr present the card as
+// gfx1030, which is ISA-compatible across RDNA 2 and is the standard fix.
+//
+// Applied to the whole RDNA 2 family, gfx1030 included: on a real gfx1030
+// it is a no-op, and resolveGpuTarget's name fallback reports every RX
+// 6000 as gfx1030 when Pinokio can't name the target, so family-wide is
+// the only way to cover those machines. Windows is unaffected — its
+// per-target nightly index ships gfx103X-dgpu kernels for all four.
+// user_env.json still overrides or unsets it.
+const hsaOverrideEnv = (kernel = {}) =>
+  kernel.platform === "linux" && isAmdRdna2(kernel)
+    ? { HSA_OVERRIDE_GFX_VERSION: "10.3.0" }
+    : {}
+
 // RDNA 3 dGPU — RX 7000 / RX 8000 series (gfx1100, gfx1101, gfx1102).
 // Excludes gfx1103 (Phoenix APU) intentionally — that target has its own
 // nightly channel and different perf characteristics.
@@ -120,6 +141,7 @@ module.exports = {
   isAmdRdna3,
   isAmdRdna4,
   isAmdApu,
+  hsaOverrideEnv,
   amdRuntimeProfile,
   runtimeProfile,
   resolveGpuTarget,

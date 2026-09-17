@@ -2,7 +2,7 @@
 // Unit test for launcher_profile.resolveGpuTarget + torch.js step shape.
 // Run: node test_gpu_detection.js
 const assert = require("assert")
-const { resolveGpuTarget, isAmd, isAmdApu } = require("./launcher_profile")
+const { resolveGpuTarget, isAmd, isAmdApu, hsaOverrideEnv } = require("./launcher_profile")
 const torchConfig = require("./torch.js")
 
 const kernelStrixHalo = {
@@ -74,6 +74,20 @@ assert.strictEqual(resolveGpuTarget({
 
 // isAmdApu now works through the fallback
 assert.strictEqual(isAmdApu(kernelStrixHalo), true, "isAmdApu via fallback")
+
+// ── hsaOverrideEnv: Linux RDNA 2 only (CLAUDE.md #13) ────────────────
+const linuxRx6600 = { platform: "linux", gpu: "amd", gpu_model: "amd radeon rx 6600", gpu_target: "gfx1032" }
+assert.deepStrictEqual(hsaOverrideEnv(linuxRx6600), { HSA_OVERRIDE_GFX_VERSION: "10.3.0" },
+  "gfx1032 on Linux has no wheel kernels — override to gfx1030")
+// The name fallback reports every RX 6000 as gfx1030, so the override must
+// cover the whole family or those machines stay broken.
+assert.deepStrictEqual(hsaOverrideEnv({ platform: "linux", gpu: "amd", gpu_model: "amd radeon rx 6650 xt" }),
+  { HSA_OVERRIDE_GFX_VERSION: "10.3.0" }, "RDNA2 via name fallback")
+assert.deepStrictEqual(hsaOverrideEnv({ ...linuxRx6600, platform: "win32" }), {},
+  "Windows ships gfx103X-dgpu kernels — no override")
+assert.deepStrictEqual(hsaOverrideEnv(kernelLinux), {}, "gfx1100 is built into the Linux wheel")
+assert.deepStrictEqual(hsaOverrideEnv({ platform: "linux", gpu: "nvidia", gpu_target: "gfx1032" }), {}, "non-AMD untouched")
+assert.deepStrictEqual(hsaOverrideEnv({}), {}, "empty kernel")
 
 // ── torch.js step shape ──────────────────────────────────────────────
 ;(async () => {

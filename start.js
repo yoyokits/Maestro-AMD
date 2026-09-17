@@ -1,6 +1,6 @@
 const fs = require("fs")
 const path = require("path")
-const { runtimeProfile } = require("./launcher_profile")
+const { runtimeProfile, hsaOverrideEnv } = require("./launcher_profile")
 
 // Default runtime environment for `python launch.py`.
 //
@@ -74,9 +74,11 @@ const loadUserEnv = () => {
   }
 }
 
-const buildEnv = (port) => {
+const buildEnv = (port, kernel) => {
   const { overrides, note } = loadUserEnv()
-  const env = { SERVER_PORT: port, ...DEFAULT_ENV }
+  // hsaOverrideEnv is GPU-dependent (Linux RDNA 2 only) — see
+  // launcher_profile.js and CLAUDE.md #13.
+  const env = { SERVER_PORT: port, ...DEFAULT_ENV, ...hsaOverrideEnv(kernel) }
   const applied = []
   for (const [key, value] of Object.entries(overrides)) {
     if (value === null) {
@@ -93,7 +95,7 @@ const buildEnv = (port) => {
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const port = await kernel.port()
-  const { env, note, applied } = buildEnv(port)
+  const { env, note, applied } = buildEnv(port, kernel)
 
   return {
     daemon: true,

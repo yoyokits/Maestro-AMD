@@ -43,6 +43,7 @@ Maestro-AMD/
 ├── ensure_ffmpeg.py        ← provisions ffmpeg/ffprobe, see #3/#4
 ├── test_gpu_detection.js   ← unit tests for launcher_profile/torch.js detection logic
 ├── test_amd_defaults.py    ← finetune-override tests + upstream loader contract, see #12
+├── test_audio_separator_cpu.py ← preamble CPU-hook tests, see #13
 ├── .maestro_state/         ← wrapper state (git-ignored, OUTSIDE Maestro/)
 ├── user_env.json           ← optional env overrides (git-ignored)
 ├── CLAUDE.md               ← this file
@@ -66,7 +67,9 @@ upstream, which is why `git pull` on update naturally preserves it.
 `launcher_profile.js` is the **single source of truth** for what's
 supported. Adding a GPU family means editing three places together:
 
-1. Add a helper (`isAmdFoo`) in `launcher_profile.js`.
+1. Add a helper (`isAmdFoo`) in `launcher_profile.js`, and check whether the
+   family needs an `hsaOverrideEnv()` entry — on Linux, PyTorch's wheels
+   only carry kernels for some targets (issue #13).
 2. Add the family's gfx targets to `WIN_WHEEL_INDEXES` in `torch.js`
    (and the fallback table `GPU_NAME_TARGETS` in `launcher_profile.js`
    if Pinokio's own detection can't name them — see "GPU detection").
@@ -266,6 +269,19 @@ python test_amd_defaults.py --wgp Maestro/app/wgp.py [--app Maestro/app]
 `--wgp` is repeatable (point it at older/newer upstream `wgp.py` files to
 check several loaders); `--app` seeds the contract with a real install's
 defaults and finetunes (read-only).
+
+`test_audio_separator_cpu.py` covers the audio-separator CPU hook (issue
+#13). Stdlib only by default; pass a venv to also exercise the real
+installed package, and `--app` for upstream's real `get_vocals()`:
+
+```
+python test_audio_separator_cpu.py [--python Maestro/app/env-amd/Scripts/python.exe] [--app Maestro/app]
+```
+
+It loads the preamble from this repo via `PYTHONPATH`, so it tests
+uncommitted changes without installing anything into the venv. Run it with
+`--python` after an upstream `audio-separator` bump — if the hook stops
+applying, the seam moved.
 
 For the async-export files (install/torch/start/update),
 `node --check` catches parse errors but not runtime issues in the
@@ -924,6 +940,84 @@ name/URLs/architecture intact and the encoder on `gguf_q4_k_m`.
 `wgp.py` first** — if it fails or skips ("loader functions renamed"), the
 loader changed and this section needs revisiting.
 
+
+### 13. Segfault on Director song upload, then every request "failed to fetch"
+
+**Symptom** (reported: [issue #3](https://github.com/yoyokits/Maestro-AMD/issues/3),
+Debian 13, RX 6600, `torch 2.11.0+rocm7.2`): uploading a song in the
+Director shows "analyzing" for ~15 s, then "failed to fetch"; the upload
+control and **Start** stay greyed out. The terminal shows the analysis
+reaching vocal extraction and then:
+
+```
+  0%|                                        | 0/27 [00:00<?, ?steps/s]
+Segmentation fault (core dumped)
+```
+
+**Read those three complaints as one bug.** A segfault kills the whole
+`launch.py` process, so afterwards *every* request fails — including the
+Settings save. The same report's "LLM Device won't stay on CPU" is the same
+crash: `ServicesSettingsPanel.tsx` is a controlled `<select>` and
+`useStore.updateServicesConfig` only updates state after the PUT succeeds
+(no optimistic update), so with the backend dead the dropdown snaps back.
+Do not chase it separately.
+
+**Root cause — the GPU has no kernels in the installed wheel.** PyTorch's
+Linux `rocm7.2` wheels (what `torch.js` installs on Linux) are built for
+`PYTORCH_ROCM_ARCH=...gfx1030;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201...`
+— **no gfx1031/gfx1032/gfx1034** (verified in pytorch v2.11.0's
+`.ci/docker/manywheel/build.sh`; the same list prunes the bundled
+rocBLAS/hipBLASLt kernel libraries). An RX 6600/6650 is gfx1032, an
+RX 6700/6750 gfx1031. `torch.cuda.is_available()` still returns True, so
+everything looks fine until the first real kernel launch — which dies with
+no Python traceback. Vocal extraction is simply the first GPU work a song
+upload does; generation would crash the same way.
+
+**Fix — `hsaOverrideEnv()` in `launcher_profile.js`**, merged into the env
+by `start.js` and `diagnose.js`: on **Linux** RDNA 2 it sets
+`HSA_OVERRIDE_GFX_VERSION=10.3.0`, which makes ROCr present the card as
+gfx1030 (ISA-compatible across RDNA 2 — the standard fix for these cards).
+Applied family-wide including gfx1030, because it is a no-op on a real
+gfx1030 and `resolveGpuTarget`'s name fallback reports every RX 6000 as
+gfx1030 when Pinokio cannot name the target. Windows needs nothing — its
+per-target nightly index ships gfx103X-dgpu kernels for all four.
+`user_env.json` still overrides or unsets it.
+
+**Diagnose catches the whole class, not just this case.**
+`check_arch_kernels()` compares the device's `gcnArchName` against
+`torch.cuda.get_arch_list()` and fails with the override hint when the
+target is missing — so a future wheel that drops an arch (the gfx115x APUs
+are the likely next victims: the wheel has gfx1150/1151, not gfx1152/1153)
+is reported instead of segfaulting.
+
+**Second lever, opt-in: `MAESTRO_AMD_AUDIO_SEPARATOR_DEVICE=cpu`.**
+`audio-separator` (the RoFormer vocal extractor) picks its device from
+`torch.cuda.is_available()` and ignores `extract_vocals.py`'s own
+`torch.set_default_device('cpu')` — `Separator.setup_torch_device()`
+computes its own. Setting that variable in `user_env.json` makes
+`maestro_amd_preamble.py` install a `sys.meta_path` post-import hook that
+wraps `Separator.__init__` and moves instances to CPU, for a GPU that
+cannot run this model even with a correct wheel. **Not the default:**
+measured on an RX 7900 XTX, a 60 s clip separates in **19 s on the GPU**
+and had not finished one of eight chunks after **11 minutes** on twelve CPU
+threads (this ROCm build's CPU BLAS is ~10x slower than MKL —
+`BLAS_INFO=open`, a 2048² matmul takes 1.1 s). Forcing CPU by default
+would trade a crash on some GPUs for an unusable feature on all of them.
+
+The hook targets the public `audio_separator.separator.Separator` and the
+two attributes `load_model()` passes to the model (`torch_device`,
+`onnx_execution_provider`) — unchanged from audio-separator 0.36.1 (the
+current pin) through 0.47.0 — rather than the internal
+`setup_torch_device()`. Diagnose warns if the installed package stops
+matching that seam.
+
+**Verified** on the live RX 7900 XTX install with
+`test_audio_separator_cpu.py` (15 cases: hook mechanics against a fake
+package, the real installed audio-separator on real ROCm torch, and
+upstream's real `get_vocals()` end to end). The gfx1032 crash itself could
+**not** be reproduced here — gfx1100 has kernels and runs the separator
+fine — so the Linux RDNA 2 fix rests on the wheel's arch list, not on a
+local repro. Ask an affected reporter to confirm.
 
 ## Do not
 

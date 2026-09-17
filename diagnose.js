@@ -1,4 +1,4 @@
-const { runtimeProfile } = require("./launcher_profile")
+const { runtimeProfile, hsaOverrideEnv } = require("./launcher_profile")
 
 // Health check. Runs diagnose.py inside the ROCm venv with the same
 // environment start.js uses, so the attention-backend probe reflects what
@@ -22,13 +22,15 @@ module.exports = async (kernel) => {
         params: {
           venv: runtime.env,
           venv_python: runtime.python,
-          // Mirror start.js so the SDPA probe sees the real conditions.
+          // Mirror start.js so the SDPA probe sees the real conditions —
+          // including the Linux RDNA 2 gfx override (CLAUDE.md #13).
           env: {
             TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: "1",
             PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True",
             HSA_ENABLE_SDMA: "0",
             MIOPEN_FIND_MODE: "FAST",
             MIOPEN_DISABLE_CACHE: "1",
+            ...hsaOverrideEnv(kernel),
           },
           path: runtime.path,
           message: `python "${__dirname}/diagnose.py"`,
