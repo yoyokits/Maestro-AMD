@@ -44,6 +44,7 @@ Maestro-AMD/
 ├── test_gpu_detection.js   ← unit tests for launcher_profile/torch.js detection logic
 ├── test_amd_defaults.py    ← finetune-override tests + upstream loader contract, see #12
 ├── test_audio_separator_cpu.py ← preamble CPU-hook tests, see #13
+├── test_crash_report.py    ← Diagnose crashed-session report tests, see #13
 ├── .maestro_state/         ← wrapper state (git-ignored, OUTSIDE Maestro/)
 ├── user_env.json           ← optional env overrides (git-ignored)
 ├── CLAUDE.md               ← this file
@@ -282,6 +283,18 @@ It loads the preamble from this repo via `PYTHONPATH`, so it tests
 uncommitted changes without installing anything into the venv. Run it with
 `--python` after an upstream `audio-separator` bump — if the hook stops
 applying, the seam moved.
+
+`test_crash_report.py` covers `diagnose.py`'s `scan_crash()` /
+`check_last_run()` (issue #13). Stdlib only, no venv, no arguments:
+
+```
+python test_crash_report.py
+```
+
+Most of its cases are things that must **not** be reported — a filename
+containing "Killed", `Aborted job 44f28994`, a previous run's segfault
+above the tail window. Keep it that way: a false positive tells a healthy
+user their backend crashed.
 
 For the async-export files (install/torch/start/update),
 `node --check` catches parse errors but not runtime issues in the
@@ -954,13 +967,38 @@ reaching vocal extraction and then:
 Segmentation fault (core dumped)
 ```
 
-**Read those three complaints as one bug.** A segfault kills the whole
-`launch.py` process, so afterwards *every* request fails — including the
-Settings save. The same report's "LLM Device won't stay on CPU" is the same
-crash: `ServicesSettingsPanel.tsx` is a controlled `<select>` and
-`useStore.updateServicesConfig` only updates state after the PUT succeeds
-(no optimistic update), so with the backend dead the dropdown snaps back.
-Do not chase it separately.
+**Read every "my setting won't save" complaint as this same bug.** A
+segfault kills the whole `launch.py` process, so afterwards *every* request
+fails — including the Settings save. Two separate reports from this one
+crash have already arrived as their own issues:
+
+- *"LLM Device won't stay on CPU"* — `ServicesSettingsPanel.tsx` is a
+  controlled `<select>` and `useStore.updateServicesConfig` only updates
+  state after the PUT succeeds (no optimistic update), so with the backend
+  dead the dropdown snaps back.
+- *"Can't save my CivitAI API key, it says 'API key not set'"*
+  ([issue #4](https://github.com/yoyokits/Maestro-AMD/issues/4), filed 51
+  minutes after #3 and before the fix existed). Same shape, worse: the
+  `ApiKeyField` Save button is **fire-and-forget**
+  (`onSave(value); setEditing(false)`, not awaited) and the display falls
+  back to `isSet ? maskedValue : 'Not set'`, so any backend failure reads
+  as "not set" with no error shown at all.
+
+Neither is a CivitAI or an LLM bug — **do not chase them separately.**
+Verified on the live install (2026-09-17): with the backend alive, a normal
+32-hex key `PUT`s `200`, is stored unmasked in `wgp_config.json`, and reads
+back `civitai_api_key_set: true`. The save path is healthy; a dead backend
+is the whole story. `check_last_run()` in `diagnose.py` now names the crash
+outright so the next such report needs no re-derivation.
+
+One genuinely separate upstream defect found while confirming the above,
+worth knowing but **not** what these reporters hit: `launch.py`'s guard
+`if key.endswith("_api_key") and value and "..." in value: continue` skips
+any key merely *containing* `...`, rather than one matching the app's own
+mask format (`abcd...wxyz`). Such a key silently 400s with
+`"No valid fields to update"` and the field reverts — reproduced live. Real
+CivitAI keys are 32-char hex, so it takes a bad copy-paste to trigger. It
+is upstream's to fix (present on upstream `main`); never patch it here.
 
 **Root cause — the GPU has no kernels in the installed wheel.** PyTorch's
 Linux `rocm7.2` wheels (what `torch.js` installs on Linux) are built for
@@ -989,6 +1027,23 @@ per-target nightly index ships gfx103X-dgpu kernels for all four.
 target is missing — so a future wheel that drops an arch (the gfx115x APUs
 are the likely next victims: the wheel has gfx1150/1151, not gfx1152/1153)
 is reported instead of segfaulting.
+
+`check_last_run()` covers the other half — the *symptom* rather than the
+cause. It reads the tail of Pinokio's own `logs/api/start.js/latest` and
+warns when the previous Start ended in a `Segmentation fault`, `Bus error`,
+`Fatal Python error`, `Aborted`, or a bare `Killed` (the Linux OOM killer,
+a live risk on the 32 GB machines in #9/#10), naming the crash and its
+timestamp. That turns "my setting won't save" / "failed to fetch" /
+"Start is greyed out" into one line instead of a debugging session.
+
+It deliberately reads only *Pinokio's* logs and generic process-death
+strings — it imports nothing from Maestro and parses no upstream data
+structure, so no upstream release can change its behaviour. Matching is
+anchored to line starts (and whole-line for `Killed`/`Aborted`) so a model
+name or a requested filename cannot fake a crash, and only the last ~40
+lines are considered so a previous run's crash is not reported forever.
+Checked against all 86 real logs in the dev machine's install: zero false
+positives. Tests in `test_crash_report.py`.
 
 **Second lever, opt-in: `MAESTRO_AMD_AUDIO_SEPARATOR_DEVICE=cpu`.**
 `audio-separator` (the RoFormer vocal extractor) picks its device from

@@ -29,10 +29,12 @@ feedback loop is what produced the runaway subprocess storm.
 import importlib.util
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import sysconfig
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -156,6 +158,85 @@ def check_layout():
             "React UI not built -- only the Classic UI (/classic) will load",
             "Run Update to rebuild it.",
         )
+
+
+# Shell/interpreter death notices, anchored to the start of a line so a
+# model name or a requested filename containing one of these words cannot
+# masquerade as a crash. "Killed" and "Aborted" are whole-line only for the
+# same reason -- that is exactly how a shell prints them.
+FATAL_PATTERNS = (
+    (re.compile(r"^Segmentation fault\b"),
+     "it segfaulted -- a native library or the GPU driver crashed the process"),
+    (re.compile(r"^Bus error\b"),
+     "it died on a bus error"),
+    (re.compile(r"^Fatal Python error\b"),
+     "the Python interpreter aborted"),
+    (re.compile(r"^Aborted( \(core dumped\))?\s*$"),
+     "a native library called abort()"),
+    (re.compile(r"^Killed\s*$"),
+     "the OOM killer stopped it -- the machine ran out of system RAM"),
+)
+
+LOG_DIR = REPO / "logs" / "api" / "start.js"
+LOG_TAIL_BYTES = 64 * 1024
+
+
+def scan_crash(text, tail_lines=40):
+    """Did this Start log end in a crash rather than a clean exit?
+
+    Only the tail is read. A fatal marker is where the process stopped, so
+    one further up belongs to a run that already ended -- looking at the
+    whole file would report an old crash forever. uvicorn access lines are
+    skipped outright: a request for a file named "Killed" is not a crash.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in reversed(lines[-tail_lines:]):
+        if line.startswith("INFO:") and "HTTP/" in line:
+            continue
+        for pattern, reason in FATAL_PATTERNS:
+            if pattern.search(line):
+                return reason, line
+    return None
+
+
+def check_last_run():
+    """Did the previous Start end in a crash? (CLAUDE.md #13)
+
+    Reads Pinokio's own log, not anything of Maestro's. When the backend
+    dies, every later request fails and the UI reports it as whatever the
+    user happened to be doing -- "failed to fetch", a greyed-out Start, or a
+    Setting that silently snaps back to its old value (issues #3 and #4).
+    Naming the crash here saves re-deriving it from the symptom.
+    """
+    section("Previous session  (CLAUDE.md #13)")
+    log = LOG_DIR / "latest"
+    try:
+        if not log.exists():
+            info("no Start log yet -- Maestro has not been started from Pinokio")
+            return
+        stat = log.stat()
+        with open(log, "rb") as fh:
+            if stat.st_size > LOG_TAIL_BYTES:
+                fh.seek(-LOG_TAIL_BYTES, os.SEEK_END)
+            text = fh.read().decode("utf-8", errors="replace")
+        when = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError as exc:
+        info(f"could not read {log}: {exc}")
+        return
+
+    hit = scan_crash(text)
+    if hit is None:
+        ok(f"no crash in the last Start log ({when})")
+        return
+    reason, line = hit
+    warn(
+        f"the last Start ({when}) ended in a crash: {reason}",
+        "Every request after that point failed, so the UI would have shown "
+        "'failed to fetch', a greyed-out Start, or a Setting snapping back "
+        "to its old value. See the GPU kernel report below for the cause.",
+    )
+    info(f"log line:  {line[:160]}")
+    info(f"full log:  {log}")
 
 
 def check_ffmpeg():
@@ -605,6 +686,7 @@ def main():
     print("Attach this output when reporting an issue.")
     check_host()
     check_layout()
+    check_last_run()
     check_env()
     check_ffmpeg()
     check_fsdp_shadow()

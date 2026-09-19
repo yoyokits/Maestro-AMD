@@ -28,6 +28,12 @@ it is whatever `Maestro/` is checked out at. **Diagnose** prints both.
 
 ### Added
 
+- **Diagnose reports when the previous Start ended in a crash** (segfault,
+  bus error, Python fatal error, abort, or the Linux OOM killer). A dead
+  backend makes every request fail, which the UI reports as whatever you
+  were doing — "failed to fetch", a greyed-out Start, or a setting that
+  silently reverts (a CivitAI key that "won't save", issue #4, was this).
+  It reads only Pinokio's own log tail, so upstream updates cannot affect it.
 - **Diagnose reports whether PyTorch actually ships kernels for your GPU**,
   comparing the device's gfx target against `torch.cuda.get_arch_list()`.
   This is the failure above, generalized — it will catch the next wheel
