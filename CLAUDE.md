@@ -583,6 +583,48 @@ grep -oE "[0-9]+ steps; attention" logs/api/start.js/<id>
 
 Read them before concluding anything about H3 performance.
 
+### 6c. The encoder override stopped protecting anyone — NVFP4 preselected again
+
+**Symptom** (Maestro v2.6.0, RX 7900 XTX / 64 GB, October 2026): a fresh
+H3 session in the Studio sent `"minimax_h3_text_encoder": "nvfp4_awq"`
+and started downloading the 15.7 GB NVFP4 encoder — although every
+managed `finetunes/minimax_h3*.json` said
+`minimax_h3_text_encoder_default: gguf_q4_k_m` and Diagnose reported the
+override as fine.
+
+**Root cause.** Upstream now resolves the default in `launch.py`
+`_recommended_minimax_h3_encoder()` by calling the handler's
+hardware-aware `recommend_text_encoder()`, and only falls back to the
+model-def key if that throws. The recommender is the #6 logic gap
+(`if "nvfp4_awq" in choices and ram_gb >= 24: return "nvfp4_awq"`, no
+`supports_nvfp4` check), so on any AMD machine with ≥ 24 GB RAM the UI
+preselects NVFP4. The UI only takes the encoder from `model-options` until
+the user picks one, so every fresh install and every new browser hits it.
+Note that cancelling such a job does **not** stop an in-flight model
+download — restart the server if NVFP4 must not load.
+
+**Fix — `configure_amd_defaults.py` writes the variants too.**
+`init_model_def()` does `default_model_def.update(model_def)`, so a
+JSON-defined `minimax_h3_text_encoder_variants` replaces the handler's.
+The managed copies now carry upstream's own variants dict **minus
+`nvfp4_awq`**, taken by loading `minimax_h3_handler.py` on its own (it
+imports only `os` — not the `models` package, whose `__init__` imports
+torch) and calling `_text_encoder_variants()`, so no URL or revision is
+ever copied into this repo. The recommender, the UI dropdown and the
+generate endpoint all read that dict: NVFP4 cannot be recommended or
+offered, and a request for it gets HTTP 400. Everything else is upstream's
+choice — Q2_K on ≤ 16 GB cards, Quanto INT8 on ≥ 56 GB RAM, Q4_K_M
+otherwise (decision: remove the hazard only, don't second-guess the rest).
+If the handler can't be read, the variants are left alone and only the old
+default key is written; Start never fails on it.
+
+Diagnose now checks for NVFP4 in the offered variants rather than the
+default key, which no longer means anything on its own.
+`test_amd_defaults.py --app Maestro/app` runs upstream's **real**
+`_recommend_text_encoder()` over the wrapper's output for 35 AMD RAM/VRAM
+shapes, and asserts the unfixed list still picks NVFP4 — if that last
+assertion ever fails, upstream fixed the bug and this override can shrink.
+
 ### 7. `AssertionError: Torch not compiled with CUDA enabled`
 
 **Symptom:** Maestro imports fine, logs some harmless-looking warnings,

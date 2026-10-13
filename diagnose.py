@@ -427,10 +427,16 @@ def check_amd_defaults():
                 d = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 d = None
-            enc = (d or {}).get("model", {}).get("minimax_h3_text_encoder_default")
-            # Any variant except NVFP4 is safe. Which GGUF/int8 variant is
-            # a speed/quality preference, not a correctness issue.
-            if enc and enc != "nvfp4_awq":
+            model = (d or {}).get("model", {})
+            enc = model.get("minimax_h3_text_encoder_default")
+            # The default key alone no longer protects anyone: upstream's
+            # hardware recommender overrides it and picks NVFP4 on >=24 GB
+            # RAM. What protects is NVFP4 being absent from the offered
+            # variants (CLAUDE.md #6c). Which GGUF/int8 variant gets picked
+            # is a speed/quality preference, not a correctness issue.
+            variants = model.get("minimax_h3_text_encoder_variants")
+            if enc and enc != "nvfp4_awq" and isinstance(variants, dict) \
+                    and variants and "nvfp4_awq" not in variants:
                 seen.add(enc)
                 continue
             # A finetune the user wrote themselves is never overwritten by
@@ -441,22 +447,25 @@ def check_amd_defaults():
                 missing.append(mt)
         if missing:
             warn(
-                f"H3 text-encoder override missing for {len(missing)}/{len(h3_types)} "
-                "model(s): " + ", ".join(missing[:3]) + ("..." if len(missing) > 3 else ""),
-                "Run Update -- NVFP4 AWQ is the stock default and hangs the "
-                "whole OS on AMD.",
+                f"NVFP4 AWQ is still offered for {len(missing)}/{len(h3_types)} "
+                "H3 model(s): " + ", ".join(missing[:3]) + ("..." if len(missing) > 3 else ""),
+                "Run Update -- Maestro preselects NVFP4 AWQ on machines with "
+                "24 GB+ RAM, and it hangs the whole OS on AMD. Until then, set "
+                "Advanced Settings -> H3 Text Encoder to GGUF Q4_K_M by hand.",
             )
         if user_owned:
             warn(
-                "your own finetune overrides these H3 model(s) without setting "
-                "a text encoder: " + ", ".join(user_owned),
-                'Add "minimax_h3_text_encoder_default": "gguf_q4_k_m" to the '
-                '"model" block of the matching file in Maestro/app/finetunes/. '
-                "The wrapper will not edit a finetune you wrote.",
+                "your own finetune overrides these H3 model(s), so NVFP4 AWQ "
+                "is still offered and may be preselected: " + ", ".join(user_owned),
+                "The wrapper will not edit a finetune you wrote. Set Advanced "
+                "Settings -> H3 Text Encoder to GGUF Q4_K_M before generating, "
+                "or rename your file aside and click Start so the wrapper's "
+                "override takes its place.",
             )
         if not missing and not user_owned:
             which = ", ".join(sorted(seen)) or "(none)"
-            ok(f"H3 text encoder default is {which} ({len(h3_types)} models)")
+            ok(f"NVFP4 AWQ removed from the H3 encoder choices; fallback default "
+               f"{which} ({len(h3_types)} models)")
             if "nvfp4" not in which:
                 info("If an H3 generation stalls, check whether a "
                      "'Fused 4-Step (Experimental)' variant is selected -- "
