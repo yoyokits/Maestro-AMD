@@ -643,6 +643,48 @@ def check_attention(torch):
         ok("at least one memory-efficient attention backend is usable")
 
 
+def check_conv(torch):
+    """bf16 convolutions -- what every image VAE decode runs (CLAUDE.md #14).
+
+    MIOpen's GemmFwdRest solver returns NaN for these on the Windows ROCm
+    nightly, which shows up as banded static instead of an image. Runs one
+    small conv with the backend Maestro will use and checks it against fp32.
+    """
+    section("bf16 convolution  (CLAUDE.md #14)")
+    if torch is None or not torch.cuda.is_available():
+        info("skipped -- no usable GPU")
+        return
+    env = "MAESTRO_AMD_DISABLE_MIOPEN"
+    hooked = any(getattr(f, "__maestro_amd_hook__", None) == "torch" for f in sys.meta_path)
+    if os.environ.get(env, "").strip() == "1" and torch.backends.cudnn.enabled:
+        fail(f"{env}=1 is set but MIOpen is still enabled",
+             "Run Update to reinstall the preamble.")
+    backend = "MIOpen" if torch.backends.cudnn.enabled else "native (MIOpen off)"
+    info(f"conv backend  {backend}{' via wrapper preamble' if hooked else ''}")
+    try:
+        import torch.nn.functional as F
+        g = torch.Generator(device="cpu").manual_seed(0)
+        x = torch.randn(1, 64, 64, 64, generator=g).cuda()
+        w = (torch.randn(64, 64, 3, 3, generator=g) / 24).cuda()
+        out = F.conv2d(x.bfloat16(), w.bfloat16(), padding=1).float()
+        ref = F.conv2d(x, w, padding=1)
+        err = ((out - ref).norm() / ref.norm()).item()
+        del x, w, out, ref
+        torch.cuda.empty_cache()
+    except Exception as exc:
+        warn(f"bf16 conv probe failed to run: {exc}")
+        return
+    if err == err and err < 0.02:
+        ok(f"bf16 conv correct (rel. error {err:.4f})")
+    else:
+        fail(
+            f"bf16 conv returns wrong results (rel. error {err}) -- images will "
+            "come out as noise/static",
+            f"Start sets {env}=1 on Windows to bypass MIOpen. If you unset it "
+            "in user_env.json, remove that entry; otherwise run Update.",
+        )
+
+
 def check_triton():
     section("Triton  (PERFORMANCE.md section 3.1)")
     try:
@@ -671,6 +713,7 @@ def check_env():
         "MIOPEN_FIND_MODE",
         "MIOPEN_DISABLE_CACHE",
         "HSA_OVERRIDE_GFX_VERSION",
+        "MAESTRO_AMD_DISABLE_MIOPEN",
     ):
         val = os.environ.get(key)
         info(f"{key:<40} {val if val is not None else '(unset)'}")
@@ -694,6 +737,7 @@ def main():
     check_amd_defaults()
     torch = check_torch()
     check_attention(torch)
+    check_conv(torch)
     check_triton()
 
     section("Summary")

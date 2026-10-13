@@ -1,6 +1,6 @@
 const fs = require("fs")
 const path = require("path")
-const { runtimeProfile, hsaOverrideEnv } = require("./launcher_profile")
+const { runtimeProfile, hsaOverrideEnv, convBackendEnv } = require("./launcher_profile")
 
 // Default runtime environment for `python launch.py`.
 //
@@ -77,8 +77,9 @@ const loadUserEnv = () => {
 const buildEnv = (port, kernel) => {
   const { overrides, note } = loadUserEnv()
   // hsaOverrideEnv is GPU-dependent (Linux RDNA 2 only) — see
-  // launcher_profile.js and CLAUDE.md #13.
-  const env = { SERVER_PORT: port, ...DEFAULT_ENV, ...hsaOverrideEnv(kernel) }
+  // launcher_profile.js and CLAUDE.md #13. convBackendEnv turns MIOpen off
+  // on Windows, where its bf16 convs return NaN (CLAUDE.md #14).
+  const env = { SERVER_PORT: port, ...DEFAULT_ENV, ...hsaOverrideEnv(kernel), ...convBackendEnv(kernel) }
   const applied = []
   for (const [key, value] of Object.entries(overrides)) {
     if (value === null) {

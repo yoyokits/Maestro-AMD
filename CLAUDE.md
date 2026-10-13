@@ -1074,6 +1074,33 @@ upstream's real `get_vocals()` end to end). The gfx1032 crash itself could
 fine — so the Linux RDNA 2 fix rests on the wheel's arch list, not on a
 local repro. Ask an affected reporter to confirm.
 
+### 14. Images come out as banded static (Windows)
+
+**Symptom:** an image generation (seen with Z-Image Turbo) runs to
+completion and saves, but the picture is horizontal bands of coloured
+noise. No error anywhere; the log only shows a few
+`MIOpen(HIP): Warning [IsEnoughWorkspace] ... Solver <GemmFwdRest>` lines.
+
+**Root cause — MIOpen's bf16 GEMM conv solver returns NaN** on the Windows
+ROCm nightly (`2.10.0a0+rocm7.10.0a20251120`, RX 7900 XTX / gfx1100).
+Deterministic: a single `F.conv2d` on a `1x64x64x64` bf16 tensor gives NaN,
+and `MIOPEN_LOG_LEVEL=5` shows `FW Chosen Algorithm: GemmFwdRest`. fp32
+convs and conv3d were correct. Image VAEs decode in bf16, so every image
+is garbage. Not the HSA override, not `MIOPEN_FIND_MODE`/`DISABLE_CACHE` —
+same result with and without each.
+
+**Fix — MIOpen off.** `convBackendEnv()` in `launcher_profile.js` sets
+`MAESTRO_AMD_DISABLE_MIOPEN=1` on Windows (start.js and diagnose.js);
+`maestro_amd_preamble.py` then installs a post-import hook on `torch` that
+sets `torch.backends.cudnn.enabled = False`. Registering the hook imports
+nothing (issue #2 still holds). Measured: PyTorch's native conv path is
+correct and *faster* — a VAE-shaped bf16 conv set took 0.15 s versus 32 s
+with `MIOPEN_DEBUG_CONV_GEMM=0` (the env-only alternative); conv3d is equal
+or faster with no extra VRAM. Z-Image went from static to a correct image
+in 25 s. Opt out with `{"MAESTRO_AMD_DISABLE_MIOPEN": null}` in
+`user_env.json`. Diagnose's "bf16 convolution" section runs the failing
+conv and fails if it is wrong. Linux is untouched — not observed there.
+
 ## Do not
 
 - Do not vendor upstream Maestro source files into this repo (that was
