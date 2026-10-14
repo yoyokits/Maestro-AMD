@@ -164,6 +164,20 @@ def check_layout():
 # model name or a requested filename containing one of these words cannot
 # masquerade as a crash. "Killed" and "Aborted" are whole-line only for the
 # same reason -- that is exactly how a shell prints them.
+#
+# The first five are how a *POSIX shell* announces a dead child. Windows
+# prints none of them: there the dying process emits a crash-dump header
+# and a stack trace instead. Without the two Windows entries this check is
+# inert on the platform most users are on -- it would cheerfully report
+# "no crash" for the exact failure it exists to catch. Confirmed against a
+# real HIP crash on a live Windows install:
+#
+#   Exception Code: 0xC0000005
+#   0x00007FF981DF06EB, ...\_rocm_sdk_core\bin\amdhip64_7.dll(...) +
+#       0x9206EB byte(s), hipHccModuleLaunchKernel() + 0x59B35B byte(s)
+#
+# The hex code is required to be exactly 8 digits at the start of a line,
+# which no prompt, model name or log message produces.
 FATAL_PATTERNS = (
     (re.compile(r"^Segmentation fault\b"),
      "it segfaulted -- a native library or the GPU driver crashed the process"),
@@ -175,7 +189,17 @@ FATAL_PATTERNS = (
      "a native library called abort()"),
     (re.compile(r"^Killed\s*$"),
      "the OOM killer stopped it -- the machine ran out of system RAM"),
+    (re.compile(r"^Exception Code: 0x[0-9A-Fa-f]{8}\b"),
+     "Windows killed it on a hardware exception (an access violation or "
+     "similar) -- the equivalent of a segfault"),
+    (re.compile(r"^Windows fatal exception: \S"),
+     "the Python interpreter hit a fatal Windows exception"),
 )
+
+# Frames that place a crash inside the ROCm/HIP runtime rather than
+# anywhere else. Used only to sharpen the reason text -- never to decide
+# whether something is a crash.
+HIP_FRAME = re.compile(r"amdhip64|hipHccModuleLaunchKernel|_rocm_sdk_core", re.I)
 
 LOG_DIR = REPO / "logs" / "api" / "start.js"
 LOG_TAIL_BYTES = 64 * 1024
@@ -190,13 +214,51 @@ def scan_crash(text, tail_lines=40):
     skipped outright: a request for a file named "Killed" is not a crash.
     """
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    for line in reversed(lines[-tail_lines:]):
+    window = lines[-tail_lines:]
+    for line in reversed(window):
         if line.startswith("INFO:") and "HTTP/" in line:
             continue
         for pattern, reason in FATAL_PATTERNS:
             if pattern.search(line):
+                # A Windows crash dump names the faulting module on the
+                # lines *after* the header, so say who faulted when the
+                # stack points at the HIP runtime. Presentation only.
+                if any(HIP_FRAME.search(ln) for ln in window):
+                    reason += " inside the AMD HIP runtime (the GPU driver), not Python"
                 return reason, line
     return None
+
+
+# An allocation request this large is a corrupted size, not a real capacity
+# problem. Upstream nonetheless catches it and prints "it is likely that you
+# have insufficient VRAM and you should therefore reduce the video
+# resolution or its number of frames", which sends users down the wrong
+# path -- observed live at 9980 GiB on a 24 GiB card (CLAUDE.md #10).
+#
+# The threshold sits far above any genuine request. The math-kernel OOM of
+# CLAUDE.md #5 asks for tens to hundreds of GiB and is a real problem with a
+# real fix (AOTriton), so it must keep reporting as itself.
+IMPLAUSIBLE_ALLOC_GIB = 1024.0
+ALLOC_RE = re.compile(r"Tried to allocate ([0-9]+(?:\.[0-9]+)?) GiB")
+
+
+def scan_bogus_alloc(text):
+    """The largest implausible allocation request in this session, if any.
+
+    Unlike scan_crash this looks at the whole chunk rather than the tail:
+    the process survives a caught OOM and keeps serving, so the message sits
+    wherever the failed generation happened to be. It is still scoped to one
+    session, because each Start writes its own log.
+    """
+    worst = 0.0
+    for match in ALLOC_RE.finditer(text):
+        try:
+            gib = float(match.group(1))
+        except ValueError:
+            continue
+        if gib >= IMPLAUSIBLE_ALLOC_GIB:
+            worst = max(worst, gib)
+    return worst or None
 
 
 def check_last_run():
@@ -227,16 +289,33 @@ def check_last_run():
     hit = scan_crash(text)
     if hit is None:
         ok(f"no crash in the last Start log ({when})")
-        return
-    reason, line = hit
-    warn(
-        f"the last Start ({when}) ended in a crash: {reason}",
-        "Every request after that point failed, so the UI would have shown "
-        "'failed to fetch', a greyed-out Start, or a Setting snapping back "
-        "to its old value. See the GPU kernel report below for the cause.",
-    )
-    info(f"log line:  {line[:160]}")
-    info(f"full log:  {log}")
+    else:
+        reason, line = hit
+        warn(
+            f"the last Start ({when}) ended in a crash: {reason}",
+            "Every request after that point failed, so the UI would have shown "
+            "'failed to fetch', a connection error, a greyed-out Start, or a "
+            "Setting snapping back to its old value. See the GPU kernel report "
+            "below for the cause.",
+        )
+        info(f"log line:  {line[:160]}")
+
+    # Separate failure, separate report: a caught OOM does not kill the
+    # server, so this can be present with or without a crash above.
+    bogus = scan_bogus_alloc(text)
+    if bogus is not None:
+        warn(
+            f"a generation in the last session failed asking for {bogus:,.0f} GiB of VRAM",
+            "That size is corrupted, not a real requirement, so upstream's "
+            "advice to lower the resolution or frame count does not apply -- "
+            "no card is large enough and a smaller job fails the same way. "
+            "It has been seen when offload state does not reset between jobs: "
+            "Stop and Start Maestro to clear it (Repair also works, but only "
+            "because it restarts the backend). See CLAUDE.md #10.",
+        )
+
+    if hit is not None or bogus is not None:
+        info(f"full log:  {log}")
 
 
 def check_ffmpeg():
