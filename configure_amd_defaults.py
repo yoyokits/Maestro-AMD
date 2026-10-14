@@ -65,10 +65,27 @@ never deleted); writes are atomic; and if a default ever stops looking
 like one we understand, our copy is removed and upstream's stock default
 wins. Each pass is isolated, and the script always exits 0.
 
-Setting `minimax_h3_text_encoder_default` also redirects the *download*:
-wgp.py resolves the encoder's URLs from the selected variant
-(`text_encoder_spec.get("URLs")`), so users fetch the ~14.6 GB GGUF
-Q4_K_M file instead of the ~15.7 GB NVFP4 one.
+**The default key alone stopped working.** Upstream now ignores
+`minimax_h3_text_encoder_default` when it can: `launch.py`'s
+`_recommended_minimax_h3_encoder()` asks the handler's hardware-aware
+`recommend_text_encoder()`, and only falls back to the model-def default
+if that fails. The recommender has the gap described above, so on any AMD
+machine with >=24 GB RAM the UI preselected NVFP4 again, and the encoder
+download followed the request. Observed October 2026 on Maestro v2.6.0,
+RX 7900 XTX / 64 GB.
+
+So the override now also writes `minimax_h3_text_encoder_variants`
+**without NVFP4**. `init_model_def()` lets the JSON definition win over
+the handler's own keys, and the recommender, the UI dropdown and the
+generate endpoint all read that dict -- NVFP4 cannot be recommended,
+offered or requested (the endpoint answers 400 for an unknown encoder, and
+the UI then falls back to the recommendation). Everything else is left to
+upstream: it still picks Q2_K on <=16 GB cards, Quanto INT8 on >=56 GB RAM
+and Q4_K_M otherwise. The dict is taken from upstream's own
+`_text_encoder_variants()`, loaded from the handler file alone (it imports
+only `os`), so URLs and pinned revisions are never copied into this repo.
+If that ever fails, the variants are left as upstream has them and the
+default key is all that is applied.
 
 Idempotent and conservative. Run it as often as you like.
 """
@@ -105,6 +122,8 @@ H3_SAFE_ENCODER = "gguf_q4_k_m"
 H3_BAD_ENCODER = "nvfp4_awq"
 H3_DEFAULT_KEY = "minimax_h3_text_encoder_default"
 H3_SETTING_KEY = "minimax_h3_text_encoder"
+H3_VARIANTS_KEY = "minimax_h3_text_encoder_variants"
+H3_HANDLER = APP / "models" / "minimax_h3" / "minimax_h3_handler.py"
 
 # Attention modes that cannot work on AMD because the wrapper installs no
 # Triton/Sage/FlashAttention/xformers. "auto" and "sdpa" are both fine.
@@ -295,12 +314,47 @@ def quarantine_fatal_finetunes():
         )
 
 
+def h3_safe_encoder_variants(handler=None):
+    """Upstream's H3 encoder variants with NVFP4 removed, or None.
+
+    Loads the handler file on its own -- not through the `models` package,
+    whose __init__ pulls in torch -- and calls its `_text_encoder_variants()`.
+    None means "leave upstream's variants alone": the file is missing, the
+    function moved, or the result is not the shape we know.
+    """
+    import importlib.util
+
+    path = Path(handler or H3_HANDLER)
+    if not path.is_file():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("_maestro_amd_h3_handler", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        variants = module._text_encoder_variants()
+    except Exception as exc:
+        _notes.append(f"could not read H3 encoder variants from {path.name}: {exc!r}")
+        return None
+    if not isinstance(variants, dict) or not all(
+        isinstance(spec, dict) and isinstance(spec.get("URLs"), list)
+        for spec in variants.values()
+    ):
+        _notes.append("H3 encoder variants have an unknown shape -- left to upstream")
+        return None
+    safe = {k: v for k, v in variants.items() if k != H3_BAD_ENCODER}
+    if H3_SAFE_ENCODER not in safe:
+        _notes.append(f"upstream no longer offers {H3_SAFE_ENCODER} -- variants left to upstream")
+        return None
+    return safe
+
+
 def apply_h3_default():
-    """Override the H3 text-encoder default via finetunes/."""
+    """Override the H3 text-encoder default and choices via finetunes/."""
     types = h3_model_types()
     if not types:
         _notes.append("no MiniMax H3 model definitions found -- nothing to do")
         return
+    variants = h3_safe_encoder_variants()
 
     for model_type in types:
         target = FINETUNES_DIR / f"{model_type}.json"
@@ -322,13 +376,19 @@ def apply_h3_default():
             continue
         model = desired["model"]
         model[H3_DEFAULT_KEY] = H3_SAFE_ENCODER
+        if variants is not None:
+            model[H3_VARIANTS_KEY] = variants
+            # Only read when the variants dict is empty, but upstream points
+            # it at NVFP4 -- keep anything that does read it off that file.
+            model["text_encoder_URLs"] = list(variants[H3_SAFE_ENCODER]["URLs"])
         model[MARKER] = True
 
         if existing == desired:
             continue
         if _write_json(target, desired):
             _changes.append(
-                f"{model_type}: H3 text-encoder default -> {H3_SAFE_ENCODER}"
+                f"{model_type}: H3 text encoder -> default {H3_SAFE_ENCODER}"
+                + (", NVFP4 removed from the choices" if variants is not None else "")
             )
 
 

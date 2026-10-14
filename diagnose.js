@@ -1,4 +1,4 @@
-const { runtimeProfile, hsaOverrideEnv } = require("./launcher_profile")
+const { runtimeProfile, hsaOverrideEnv, convBackendEnv } = require("./launcher_profile")
 
 // Health check. Runs diagnose.py inside the ROCm venv with the same
 // environment start.js uses, so the attention-backend probe reflects what
@@ -31,6 +31,7 @@ module.exports = async (kernel) => {
             MIOPEN_FIND_MODE: "FAST",
             MIOPEN_DISABLE_CACHE: "1",
             ...hsaOverrideEnv(kernel),
+            ...convBackendEnv(kernel),
           },
           path: runtime.path,
           message: `python "${__dirname}/diagnose.py"`,

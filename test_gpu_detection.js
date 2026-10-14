@@ -2,7 +2,7 @@
 // Unit test for launcher_profile.resolveGpuTarget + torch.js step shape.
 // Run: node test_gpu_detection.js
 const assert = require("assert")
-const { resolveGpuTarget, isAmd, isAmdApu, hsaOverrideEnv } = require("./launcher_profile")
+const { resolveGpuTarget, isAmd, isAmdApu, hsaOverrideEnv, convBackendEnv } = require("./launcher_profile")
 const torchConfig = require("./torch.js")
 
 const kernelStrixHalo = {
@@ -88,6 +88,12 @@ assert.deepStrictEqual(hsaOverrideEnv({ ...linuxRx6600, platform: "win32" }), {}
 assert.deepStrictEqual(hsaOverrideEnv(kernelLinux), {}, "gfx1100 is built into the Linux wheel")
 assert.deepStrictEqual(hsaOverrideEnv({ platform: "linux", gpu: "nvidia", gpu_target: "gfx1032" }), {}, "non-AMD untouched")
 assert.deepStrictEqual(hsaOverrideEnv({}), {}, "empty kernel")
+
+// ── convBackendEnv: MIOpen off on Windows (CLAUDE.md #14) ────────────
+assert.deepStrictEqual(convBackendEnv(kernelStrixHalo), { MAESTRO_AMD_DISABLE_MIOPEN: "1" },
+  "Windows nightly: MIOpen bf16 convs return NaN")
+assert.deepStrictEqual(convBackendEnv(kernelLinux), {}, "Linux keeps MIOpen")
+assert.deepStrictEqual(convBackendEnv({}), {}, "empty kernel")
 
 // ── torch.js step shape ──────────────────────────────────────────────
 ;(async () => {

@@ -93,6 +93,17 @@ const hsaOverrideEnv = (kernel = {}) =>
     ? { HSA_OVERRIDE_GFX_VERSION: "10.3.0" }
     : {}
 
+// MIOpen's bf16 GEMM convolution solver (GemmFwdRest) returns NaN/garbage
+// on the Windows ROCm nightly — deterministically, on an RX 7900 XTX
+// (torch 2.10.0a0+rocm7.10.0a20251120). Every bf16 VAE decode goes through
+// it, so images come out as banded static (CLAUDE.md #14). The preamble
+// turns MIOpen off (torch.backends.cudnn.enabled = False) when this is set;
+// PyTorch's native conv path is correct and, measured, faster. Windows only
+// — the Linux stable wheels were not observed to have the bug. user_env.json
+// can unset it.
+const convBackendEnv = (kernel = {}) =>
+  kernel.platform === "win32" ? { MAESTRO_AMD_DISABLE_MIOPEN: "1" } : {}
+
 // RDNA 3 dGPU — RX 7000 / RX 8000 series (gfx1100, gfx1101, gfx1102).
 // Excludes gfx1103 (Phoenix APU) intentionally — that target has its own
 // nightly channel and different perf characteristics.
@@ -142,6 +153,7 @@ module.exports = {
   isAmdRdna4,
   isAmdApu,
   hsaOverrideEnv,
+  convBackendEnv,
   amdRuntimeProfile,
   runtimeProfile,
   resolveGpuTarget,

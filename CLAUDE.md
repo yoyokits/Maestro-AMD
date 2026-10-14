@@ -583,6 +583,48 @@ grep -oE "[0-9]+ steps; attention" logs/api/start.js/<id>
 
 Read them before concluding anything about H3 performance.
 
+### 6c. The encoder override stopped protecting anyone — NVFP4 preselected again
+
+**Symptom** (Maestro v2.6.0, RX 7900 XTX / 64 GB, October 2026): a fresh
+H3 session in the Studio sent `"minimax_h3_text_encoder": "nvfp4_awq"`
+and started downloading the 15.7 GB NVFP4 encoder — although every
+managed `finetunes/minimax_h3*.json` said
+`minimax_h3_text_encoder_default: gguf_q4_k_m` and Diagnose reported the
+override as fine.
+
+**Root cause.** Upstream now resolves the default in `launch.py`
+`_recommended_minimax_h3_encoder()` by calling the handler's
+hardware-aware `recommend_text_encoder()`, and only falls back to the
+model-def key if that throws. The recommender is the #6 logic gap
+(`if "nvfp4_awq" in choices and ram_gb >= 24: return "nvfp4_awq"`, no
+`supports_nvfp4` check), so on any AMD machine with ≥ 24 GB RAM the UI
+preselects NVFP4. The UI only takes the encoder from `model-options` until
+the user picks one, so every fresh install and every new browser hits it.
+Note that cancelling such a job does **not** stop an in-flight model
+download — restart the server if NVFP4 must not load.
+
+**Fix — `configure_amd_defaults.py` writes the variants too.**
+`init_model_def()` does `default_model_def.update(model_def)`, so a
+JSON-defined `minimax_h3_text_encoder_variants` replaces the handler's.
+The managed copies now carry upstream's own variants dict **minus
+`nvfp4_awq`**, taken by loading `minimax_h3_handler.py` on its own (it
+imports only `os` — not the `models` package, whose `__init__` imports
+torch) and calling `_text_encoder_variants()`, so no URL or revision is
+ever copied into this repo. The recommender, the UI dropdown and the
+generate endpoint all read that dict: NVFP4 cannot be recommended or
+offered, and a request for it gets HTTP 400. Everything else is upstream's
+choice — Q2_K on ≤ 16 GB cards, Quanto INT8 on ≥ 56 GB RAM, Q4_K_M
+otherwise (decision: remove the hazard only, don't second-guess the rest).
+If the handler can't be read, the variants are left alone and only the old
+default key is written; Start never fails on it.
+
+Diagnose now checks for NVFP4 in the offered variants rather than the
+default key, which no longer means anything on its own.
+`test_amd_defaults.py --app Maestro/app` runs upstream's **real**
+`_recommend_text_encoder()` over the wrapper's output for 35 AMD RAM/VRAM
+shapes, and asserts the unfixed list still picks NVFP4 — if that last
+assertion ever fails, upstream fixed the bug and this override can shrink.
+
 ### 7. `AssertionError: Torch not compiled with CUDA enabled`
 
 **Symptom:** Maestro imports fine, logs some harmless-looking warnings,
@@ -1073,6 +1115,33 @@ upstream's real `get_vocals()` end to end). The gfx1032 crash itself could
 **not** be reproduced here — gfx1100 has kernels and runs the separator
 fine — so the Linux RDNA 2 fix rests on the wheel's arch list, not on a
 local repro. Ask an affected reporter to confirm.
+
+### 14. Images come out as banded static (Windows)
+
+**Symptom:** an image generation (seen with Z-Image Turbo) runs to
+completion and saves, but the picture is horizontal bands of coloured
+noise. No error anywhere; the log only shows a few
+`MIOpen(HIP): Warning [IsEnoughWorkspace] ... Solver <GemmFwdRest>` lines.
+
+**Root cause — MIOpen's bf16 GEMM conv solver returns NaN** on the Windows
+ROCm nightly (`2.10.0a0+rocm7.10.0a20251120`, RX 7900 XTX / gfx1100).
+Deterministic: a single `F.conv2d` on a `1x64x64x64` bf16 tensor gives NaN,
+and `MIOPEN_LOG_LEVEL=5` shows `FW Chosen Algorithm: GemmFwdRest`. fp32
+convs and conv3d were correct. Image VAEs decode in bf16, so every image
+is garbage. Not the HSA override, not `MIOPEN_FIND_MODE`/`DISABLE_CACHE` —
+same result with and without each.
+
+**Fix — MIOpen off.** `convBackendEnv()` in `launcher_profile.js` sets
+`MAESTRO_AMD_DISABLE_MIOPEN=1` on Windows (start.js and diagnose.js);
+`maestro_amd_preamble.py` then installs a post-import hook on `torch` that
+sets `torch.backends.cudnn.enabled = False`. Registering the hook imports
+nothing (issue #2 still holds). Measured: PyTorch's native conv path is
+correct and *faster* — a VAE-shaped bf16 conv set took 0.15 s versus 32 s
+with `MIOPEN_DEBUG_CONV_GEMM=0` (the env-only alternative); conv3d is equal
+or faster with no extra VRAM. Z-Image went from static to a correct image
+in 25 s. Opt out with `{"MAESTRO_AMD_DISABLE_MIOPEN": null}` in
+`user_env.json`. Diagnose's "bf16 convolution" section runs the failing
+conv and fails if it is wrong. Linux is untouched — not observed there.
 
 ## Do not
 

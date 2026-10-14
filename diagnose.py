@@ -427,10 +427,16 @@ def check_amd_defaults():
                 d = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 d = None
-            enc = (d or {}).get("model", {}).get("minimax_h3_text_encoder_default")
-            # Any variant except NVFP4 is safe. Which GGUF/int8 variant is
-            # a speed/quality preference, not a correctness issue.
-            if enc and enc != "nvfp4_awq":
+            model = (d or {}).get("model", {})
+            enc = model.get("minimax_h3_text_encoder_default")
+            # The default key alone no longer protects anyone: upstream's
+            # hardware recommender overrides it and picks NVFP4 on >=24 GB
+            # RAM. What protects is NVFP4 being absent from the offered
+            # variants (CLAUDE.md #6c). Which GGUF/int8 variant gets picked
+            # is a speed/quality preference, not a correctness issue.
+            variants = model.get("minimax_h3_text_encoder_variants")
+            if enc and enc != "nvfp4_awq" and isinstance(variants, dict) \
+                    and variants and "nvfp4_awq" not in variants:
                 seen.add(enc)
                 continue
             # A finetune the user wrote themselves is never overwritten by
@@ -441,22 +447,25 @@ def check_amd_defaults():
                 missing.append(mt)
         if missing:
             warn(
-                f"H3 text-encoder override missing for {len(missing)}/{len(h3_types)} "
-                "model(s): " + ", ".join(missing[:3]) + ("..." if len(missing) > 3 else ""),
-                "Run Update -- NVFP4 AWQ is the stock default and hangs the "
-                "whole OS on AMD.",
+                f"NVFP4 AWQ is still offered for {len(missing)}/{len(h3_types)} "
+                "H3 model(s): " + ", ".join(missing[:3]) + ("..." if len(missing) > 3 else ""),
+                "Run Update -- Maestro preselects NVFP4 AWQ on machines with "
+                "24 GB+ RAM, and it hangs the whole OS on AMD. Until then, set "
+                "Advanced Settings -> H3 Text Encoder to GGUF Q4_K_M by hand.",
             )
         if user_owned:
             warn(
-                "your own finetune overrides these H3 model(s) without setting "
-                "a text encoder: " + ", ".join(user_owned),
-                'Add "minimax_h3_text_encoder_default": "gguf_q4_k_m" to the '
-                '"model" block of the matching file in Maestro/app/finetunes/. '
-                "The wrapper will not edit a finetune you wrote.",
+                "your own finetune overrides these H3 model(s), so NVFP4 AWQ "
+                "is still offered and may be preselected: " + ", ".join(user_owned),
+                "The wrapper will not edit a finetune you wrote. Set Advanced "
+                "Settings -> H3 Text Encoder to GGUF Q4_K_M before generating, "
+                "or rename your file aside and click Start so the wrapper's "
+                "override takes its place.",
             )
         if not missing and not user_owned:
             which = ", ".join(sorted(seen)) or "(none)"
-            ok(f"H3 text encoder default is {which} ({len(h3_types)} models)")
+            ok(f"NVFP4 AWQ removed from the H3 encoder choices; fallback default "
+               f"{which} ({len(h3_types)} models)")
             if "nvfp4" not in which:
                 info("If an H3 generation stalls, check whether a "
                      "'Fused 4-Step (Experimental)' variant is selected -- "
@@ -643,6 +652,48 @@ def check_attention(torch):
         ok("at least one memory-efficient attention backend is usable")
 
 
+def check_conv(torch):
+    """bf16 convolutions -- what every image VAE decode runs (CLAUDE.md #14).
+
+    MIOpen's GemmFwdRest solver returns NaN for these on the Windows ROCm
+    nightly, which shows up as banded static instead of an image. Runs one
+    small conv with the backend Maestro will use and checks it against fp32.
+    """
+    section("bf16 convolution  (CLAUDE.md #14)")
+    if torch is None or not torch.cuda.is_available():
+        info("skipped -- no usable GPU")
+        return
+    env = "MAESTRO_AMD_DISABLE_MIOPEN"
+    hooked = any(getattr(f, "__maestro_amd_hook__", None) == "torch" for f in sys.meta_path)
+    if os.environ.get(env, "").strip() == "1" and torch.backends.cudnn.enabled:
+        fail(f"{env}=1 is set but MIOpen is still enabled",
+             "Run Update to reinstall the preamble.")
+    backend = "MIOpen" if torch.backends.cudnn.enabled else "native (MIOpen off)"
+    info(f"conv backend  {backend}{' via wrapper preamble' if hooked else ''}")
+    try:
+        import torch.nn.functional as F
+        g = torch.Generator(device="cpu").manual_seed(0)
+        x = torch.randn(1, 64, 64, 64, generator=g).cuda()
+        w = (torch.randn(64, 64, 3, 3, generator=g) / 24).cuda()
+        out = F.conv2d(x.bfloat16(), w.bfloat16(), padding=1).float()
+        ref = F.conv2d(x, w, padding=1)
+        err = ((out - ref).norm() / ref.norm()).item()
+        del x, w, out, ref
+        torch.cuda.empty_cache()
+    except Exception as exc:
+        warn(f"bf16 conv probe failed to run: {exc}")
+        return
+    if err == err and err < 0.02:
+        ok(f"bf16 conv correct (rel. error {err:.4f})")
+    else:
+        fail(
+            f"bf16 conv returns wrong results (rel. error {err}) -- images will "
+            "come out as noise/static",
+            f"Start sets {env}=1 on Windows to bypass MIOpen. If you unset it "
+            "in user_env.json, remove that entry; otherwise run Update.",
+        )
+
+
 def check_triton():
     section("Triton  (PERFORMANCE.md section 3.1)")
     try:
@@ -671,6 +722,7 @@ def check_env():
         "MIOPEN_FIND_MODE",
         "MIOPEN_DISABLE_CACHE",
         "HSA_OVERRIDE_GFX_VERSION",
+        "MAESTRO_AMD_DISABLE_MIOPEN",
     ):
         val = os.environ.get(key)
         info(f"{key:<40} {val if val is not None else '(unset)'}")
@@ -694,6 +746,7 @@ def main():
     check_amd_defaults()
     torch = check_torch()
     check_attention(torch)
+    check_conv(torch)
     check_triton()
 
     section("Summary")

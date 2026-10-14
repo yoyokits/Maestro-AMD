@@ -52,6 +52,21 @@ H3_DEFAULTS = {
     },
 }
 
+# Stand-in for models/minimax_h3/minimax_h3_handler.py: same function name
+# and value shape as upstream's _text_encoder_variants().
+FAKE_HANDLER = '''
+import os
+def _text_encoder_variants():
+    return {
+        k: {"name": k, "size_hint": "", "URLs": [f"https://example/{k}.bin"]}
+        for k in ("nvfp4_awq", "gguf_q2_k", "gguf_q4_k_m", "int8", "bf16")
+    }
+'''
+SAFE_VARIANTS = {
+    k: {"name": k, "size_hint": "", "URLs": [f"https://example/{k}.bin"]}
+    for k in ("gguf_q2_k", "gguf_q4_k_m", "int8", "bf16")
+}
+
 LEGACY_DELTA = {
     cad.MARKER: True,
     "model": {cad.H3_DEFAULT_KEY: cad.H3_SAFE_ENCODER},
@@ -81,6 +96,9 @@ class Tree:
         write(self.app / "wgp.py", loader)
         for name, data in H3_DEFAULTS.items():
             write(self.defaults / f"{name}.json", data)
+        self.handler = self.app / "models" / "minimax_h3" / "minimax_h3_handler.py"
+        write(self.handler, FAKE_HANDLER)
+        cad.H3_HANDLER = self.handler
         cad.APP = self.app
         cad.DEFAULTS_DIR = self.defaults
         cad.FINETUNES_DIR = self.finetunes
@@ -97,9 +115,12 @@ class Tree:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-def expected_copy(name):
+def expected_copy(name, variants=True):
     data = copy.deepcopy(H3_DEFAULTS[name])
     data["model"][cad.H3_DEFAULT_KEY] = cad.H3_SAFE_ENCODER
+    if variants:
+        data["model"][cad.H3_VARIANTS_KEY] = copy.deepcopy(SAFE_VARIANTS)
+        data["model"]["text_encoder_URLs"] = ["https://example/gguf_q4_k_m.bin"]
     data["model"][cad.MARKER] = True
     return data
 
@@ -124,6 +145,39 @@ class ConfigureAmdDefaultsTest(unittest.TestCase):
         self.assertEqual(data, expected_copy("minimax_h3"))
         self.assertNotIn(cad.MARKER, data)
         self.assertFalse(list(self.t.finetunes.glob("*.disabled*")))
+
+    def test_nvfp4_removed_from_choices(self):
+        # Upstream's recommender ignores the default key and picks NVFP4 on
+        # >=24 GB RAM; only an NVFP4-free variants dict stops it (#6c).
+        self.t.run()
+        for name in H3_DEFAULTS:
+            model = read(self.t.finetunes / f"{name}.json")["model"]
+            self.assertNotIn("nvfp4_awq", model[cad.H3_VARIANTS_KEY])
+            self.assertIn(cad.H3_SAFE_ENCODER, model[cad.H3_VARIANTS_KEY])
+
+    def test_missing_handler_still_sets_default(self):
+        self.t.handler.unlink()
+        self.t.run()
+        self.assertEqual(self.t.last_exit, 0)
+        for name in H3_DEFAULTS:
+            self.assertEqual(read(self.t.finetunes / f"{name}.json"),
+                             expected_copy(name, variants=False))
+
+    def test_broken_handler_never_blocks_start(self):
+        for source in ("raise RuntimeError('boom')\n",
+                       "def _text_encoder_variants():\n    return ['not', 'a', 'dict']\n",
+                       "def _text_encoder_variants():\n    return {'nvfp4_awq': {'URLs': []}}\n"):
+            with self.subTest(source=source):
+                write(self.t.handler, source)
+                self.t.run()
+                self.assertEqual(self.t.last_exit, 0)
+                model = read(self.t.finetunes / "minimax_h3.json")["model"]
+                self.assertNotIn(cad.H3_VARIANTS_KEY, model)
+                self.assertEqual(model[cad.H3_DEFAULT_KEY], cad.H3_SAFE_ENCODER)
+
+    def test_handler_load_does_not_import_torch(self):
+        self.t.run()
+        self.assertNotIn("torch", sys.modules)
 
     def test_second_run_changes_nothing(self):
         self.t.run()
@@ -298,6 +352,9 @@ class LoaderContractTest(unittest.TestCase):
         shutil.copy(wgp, t.app / "wgp.py")
         if REAL_APP is None:
             return H3_DEFAULTS
+        real_handler = REAL_APP / "models" / "minimax_h3" / "minimax_h3_handler.py"
+        if real_handler.is_file():
+            cad.H3_HANDLER = real_handler
         shutil.rmtree(t.defaults)
         t.defaults.mkdir()
         real = {}
@@ -331,9 +388,37 @@ class LoaderContractTest(unittest.TestCase):
                         self.assertEqual(m.get("name"), default["model"].get("name"))
                         self.assertEqual(m.get("URLs"), default["model"].get("URLs"))
                         self.assertEqual(m.get(cad.H3_DEFAULT_KEY), cad.H3_SAFE_ENCODER)
+                        self.assertNotIn("nvfp4_awq", m.get(cad.H3_VARIANTS_KEY) or {})
                         self.assertNotIn(cad.MARKER, m.get("settings") or {})
                 finally:
                     t.cleanup()
+
+    def test_upstream_recommender_never_picks_nvfp4_on_amd(self):
+        # Runs upstream's real _recommend_text_encoder() over the variants
+        # the wrapper writes, for AMD-shaped hardware. Without the fix it
+        # returns nvfp4_awq for every case with >=24 GB RAM (#6c).
+        handler = None if REAL_APP is None else (
+            REAL_APP / "models" / "minimax_h3" / "minimax_h3_handler.py")
+        if handler is None or not handler.is_file():
+            self.skipTest("needs --app pointing at a real install")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_h3_contract", handler)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        recommend = getattr(module, "_recommend_text_encoder", None)
+        if recommend is None:
+            self.skipTest("_recommend_text_encoder renamed -- update this test")
+        variants = cad.h3_safe_encoder_variants(handler)
+        self.assertIsNotNone(variants)
+        for ram in (16, 32, 48, 64, 128):
+            for vram in (8, 12, 16, 20, 24, 32, 96):
+                hw = {"ram_gb": ram, "system_ram_gb": ram, "gpu_vram_gb": vram,
+                      "supports_nvfp4": False}
+                with self.subTest(ram=ram, vram=vram):
+                    self.assertNotEqual(recommend(hw, variants), "nvfp4_awq")
+        # And the bug is real: the full upstream list does pick it.
+        hw = {"ram_gb": 64, "system_ram_gb": 64, "gpu_vram_gb": 24, "supports_nvfp4": False}
+        self.assertEqual(recommend(hw, module._text_encoder_variants()), "nvfp4_awq")
 
     def test_harness_detects_the_v220_crash(self):
         # Proves the contract test is not vacuous: the legacy delta must

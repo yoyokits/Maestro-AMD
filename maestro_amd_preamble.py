@@ -48,6 +48,15 @@ post-import hook instead. Registering it imports nothing; torch is only
 read out of sys.modules after audio_separator has imported it itself, long
 after startup.
 
+**MIOpen off on Windows.** MIOpen's bf16 GEMM convolution solver
+(`GemmFwdRest`) returns NaN on the Windows ROCm nightly, so every bf16 VAE
+decode produces banded static instead of an image. When
+`MAESTRO_AMD_DISABLE_MIOPEN=1` (start.js sets it on Windows) a post-import
+hook on `torch` sets `torch.backends.cudnn.enabled = False` right after
+torch finishes loading, routing convolutions to PyTorch's native path.
+Same hook shape as the audio-separator one: registering it imports
+nothing. See CLAUDE.md #14.
+
 **Why a .pth file and not sitecustomize.py**
 
 This was originally shipped as `sitecustomize.py`. That works, but
@@ -99,6 +108,7 @@ import types
 
 AUDIO_SEPARATOR_PACKAGE = "audio_separator.separator"
 AUDIO_SEPARATOR_DEVICE_ENV = "MAESTRO_AMD_AUDIO_SEPARATOR_DEVICE"
+DISABLE_MIOPEN_ENV = "MAESTRO_AMD_DISABLE_MIOPEN"
 HOOK_MARKER = "__maestro_amd_hook__"
 PATCH_MARKER = "__maestro_amd_cpu__"
 
@@ -278,6 +288,29 @@ def _install_audio_separator_cpu_hook():
     sys.meta_path.insert(0, _PostImportHook(AUDIO_SEPARATOR_PACKAGE, force_separator_cpu))
 
 
+def miopen_disable_requested():
+    return os.environ.get(DISABLE_MIOPEN_ENV, "").strip() == "1"
+
+
+def disable_miopen(module):
+    """Route convolutions away from MIOpen. Runs after torch has loaded."""
+    import importlib
+
+    importlib.import_module("torch.backends.cudnn").enabled = False
+
+
+def _install_miopen_off_hook():
+    if not miopen_disable_requested():
+        return
+    if "torch" in sys.modules:
+        disable_miopen(sys.modules["torch"])
+        return
+    for finder in sys.meta_path:
+        if getattr(finder, HOOK_MARKER, None) == "torch":
+            return
+    sys.meta_path.insert(0, _PostImportHook("torch", disable_miopen))
+
+
 try:
     _install_fsdp_shadow()
 except Exception:
@@ -292,6 +325,12 @@ except Exception:
 
 try:
     _install_audio_separator_cpu_hook()
+except Exception:
+    # A startup hook must never be able to break the interpreter.
+    pass
+
+try:
+    _install_miopen_off_hook()
 except Exception:
     # A startup hook must never be able to break the interpreter.
     pass
